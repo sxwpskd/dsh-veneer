@@ -1,6 +1,9 @@
-# 插件仓库统一 LF（dsh-milieu 的 CONVENTION §5 同一条）：Git 会自动转行尾，不要关它。
-* text=auto eol=lf
-# PowerShell 脚本保持 CRLF：PS 5.1 对 LF 的 .ps1 有时读不出行首（宁可保守）。
-*.ps1 text eol=crlf
-*.cmd text eol=crlf
-*.sh text eol=lf
+# 行尾策略（2026-11-20 实测定稿）
+#
+# 第一版写成 `*.ps1 text eol=crlf`，结果把仓库里的 .ps1 换成了 LF（GitHub 网页上传那版也是 LF），
+# 工作区里的 CRLF 被当成"未提交改动"，`git status` 永远脏、下一步提交会把 CRLF 换掉。
+# 所以：**一律不转换，仓库里存什么工作区就是什么**。
+#   · .js / .md / .json / .yml：LF（IDE 与 PowerShell 输出都是 LF）
+#   · .ps1 / .cmd：CRLF（PS 5.1 对 LF 的 .ps1 行首有时读不出）——**由编辑器/写入方负责，Git 不管**
+* -text
+

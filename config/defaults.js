@@ -19,8 +19,12 @@ export const DEFAULT_CONFIG = {
   scanTimeoutMs: 60000,
   // 等服务就绪等多久（毫秒）。超时用父 ctx 兜一次（与 dsh-milieu 的同一手法）。
   readyWaitMs: 10000,
-  // 工作区打开后自动扫一次。手动重扫不看这个开关。
+  // 工作区打开后自动扫一次。手动重扫（菜单）不看这个开关。
   scanOnMount: true,
+  // **手动入口的桥**（`.dsh-veneer/request.json` → 扫一次 → `result.json`）。默认开。
+  bridge: true,
+  // 桥轮询请求文件的间隔（毫秒）；有文件监视时它只是兜底。
+  bridgePollMs: 1000,
 };
 
 /** 深拷贝（只处理普通对象与数组）。 */

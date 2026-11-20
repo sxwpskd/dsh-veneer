@@ -4,7 +4,7 @@
 //   · core/ 不 import 'node:fs'（边界检查会看）；
 //   · 不判断：写什么、写哪里由 core/ 决定；
 //   · 错误原样抛出（与 node:fs 一致），由调用方包成 reason——翻译层不吞错。
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, rmSync, readdirSync, watch } from 'node:fs';
 import { dirname } from 'node:path';
 
 /** 造一份文件系统能力对象。 */
@@ -34,6 +34,21 @@ export function createFs() {
     },
     /** 目录部分。 */
     dirnameOf: (path) => dirname(path),
+    /** 列目录（只给名字；读不到 → 抛）。界面读报告目录用。 */
+    listNames: (path) => readdirSync(path, { encoding: 'utf8' }),
+    /**
+     * 看一个目录。**拿不到就是拿不到**：返回 `{ok:false, reason}`，
+     * 因为宿主文件服务可能根本没挂载（这时界面那一半要如实说"这台机器看不了"）。
+     */
+    watchDir(path, onChange) {
+      if (typeof watch !== 'function') return { ok: false, reason: 'fs.watch 不可用' };
+      try {
+        const watcher = watch(path, { persistent: false }, () => { try { onChange(); } catch { /* 回调异常不外溢 */ } });
+        return { ok: true, close: () => { try { watcher.close(); } catch { /* 已关 */ } } };
+      } catch (err) {
+        return { ok: false, reason: String((err && err.message) || err) };
+      }
+    },
   };
 }
 

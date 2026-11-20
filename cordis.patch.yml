@@ -22,5 +22,9 @@
         scanTimeoutMs: 60000
         # 服务就绪等多久（毫秒）：超时后用父 ctx 兜一次（与 dsh-milieu 的 agentLoopWaitMs 同一手法）。
         readyWaitMs: 10000
-        # 工作区打开后第一次扫描是否自动跑。手动重扫不怕失败，自动扫描只做一次。
+        # 工作区打开后第一次扫描是否自动跑。
         scanOnMount: true
+        # 手动入口的桥（插件页「检查沙箱物化」写请求 → 这里扫一次 → 写结论）。
+        bridge: true
+        # 桥轮询间隔（毫秒）；有文件监视时只是兜底。
+        bridgePollMs: 1000

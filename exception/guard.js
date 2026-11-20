@@ -32,3 +32,23 @@ export function guardSync(label, fn, opts = {}) {
     return r;
   }
 }
+
+/**
+ * 异步边界：同步 throw 与 Promise 拒绝都接住；**返回的 Promise 永远 resolve**
+ * （失败时 resolve 成统一失败结果），不会把拒绝抛给宿主。
+ * @template T
+ * @param {string} label
+ * @param {() => T | Promise<T>} fn
+ * @param {{log?:object|null, blockedBy?:string, code?:string}} [opts]
+ */
+export async function guardAsync(label, fn, opts = {}) {
+  try {
+    return await fn();
+  } catch (err) {
+    const r = fail((label ? label + '：' : '') + reasonOf(err), opts.blockedBy || null, opts.code || null);
+    try {
+      if (opts.log && typeof opts.log.warn === 'function') opts.log.warn('[veneer] ' + r.reason);
+    } catch { /* 日志口坏了不影响结果 */ }
+    return r;
+  }
+}

@@ -23,9 +23,13 @@ export function resolveRoot(host, configured) {
   if (listed && listed.ok && Array.isArray(listed.value) && listed.value.length) {
     return { ok: true, value: listed.value[0] };
   }
+  // 失败要说清"为什么"：配置没给、平台不给、还是平台给了空表——三种情况下一步完全不同。
+  const why = !listed
+    ? '宿主适配层没有 workspace'
+    : (listed.ok === false ? '平台报错：' + (listed.reason || '未知') : '平台工作区表是空的');
   return {
     ok: false,
-    reason: '没有工作区根：配置没给 workspaceRoot，平台工作区表也拿不到',
+    reason: '没有工作区根（' + why + '）；配置也没给 workspaceRoot',
     blockedBy: 'host',
   };
 }

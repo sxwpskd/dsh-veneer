@@ -170,8 +170,10 @@ export function createClientPlugin({ React, ctx, deps = {} }) {
       if (!slots || typeof slots.inject !== 'function' || typeof slots.register !== 'function') {
         return () => {};
       }
-      // `slots.inject` 的回调里注册；它返回的 disposer 由插槽自己管，这里交还一个 no-op 清理。
-      slots.inject(SLOT_KEY, () => slots.register({ name: 'plugins.row.config', key: SLOT_KEY }, Panel));
+      // 第一个参数是**插槽名**（`slots.inject(slotName, cb)`），不是 key！
+      // 2026-11-20 真机踩到：写成 `slots.inject(SLOT_KEY, …)` 不会报错，但永远不会注册，
+      // 插件页那一行因此没有「配置」控件。
+      slots.inject('plugins.row.config', () => slots.register({ name: 'plugins.row.config', key: SLOT_KEY }, Panel));
       return () => {};
     },
   };

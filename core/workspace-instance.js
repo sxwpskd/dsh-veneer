@@ -101,8 +101,10 @@ export const workspacePlugin = {
 
     if (cfg.scanOnMount || cfg.bridge) {
       if (host.canInject()) {
-        fiber = guardSync('等工作区服务', () => host.awaitWorkspace((sub) => {
-          const child = createDsh(sub, packageDir);
+        // **回调拿到的是适配层对象，不是原始 ctx**（`adapter/dsh.js` 的 `awaitWorkspace` 已经包过一次）。
+        // 再 `createDsh(child)` 就是二次包装：适配层对象上没有宿主服务属性 → 解析不到工作区根 →
+        // 扫描与手动入口全部静默不启动（2026-11-20 真机踩到，v0.2.0 的面板因此从没出现过）。
+        fiber = guardSync('等工作区服务', () => host.awaitWorkspace((child) => {
           if (cfg.scanOnMount) once(child, 'inject');
           if (cfg.bridge) startBridge(child, 'inject');
         }), { log, blockedBy: 'host', code: CODES.HOST_CALL_FAILED });

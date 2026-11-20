@@ -1,0 +1,26 @@
+# dsh-veneer 的 profile 补丁层。
+#
+# 一个 Loader 行；`workspaces` 非空时每项挂一个 child fiber（与 dsh-milieu 的 A 方案同形）。
+#
+# 注意（官方规范）：
+#   · 本文件为空或只有注释会导致启动失败——要禁用这层请写 `[]`；
+#   · 覆盖某个已存在的行会**整体替换**它的 config。
+- insert:
+    - id: veneer
+      name: dsh-veneer
+      config:
+        # 工作区根。空 = 由 `workspaces` 决定；`workspaces` 也为空时挂一个默认实例，
+        # 根在本轮第一次成功执行扫描时才解析（解析不到就只报告，不写任何文件）。
+        workspaceRoot: ''
+        # 多工作区：每项 `{ path }` 挂一个 child fiber；path 必须是绝对路径，重复直接拒绝。
+        workspaces: []
+        # 报告写到工作区里的相对路径（相对工作区根）。**不要放进 dsh-milieu 的状态文件**。
+        reportPath: review/veneer-state.json
+        # 一次扫描最多列多少个对象（超了报告 partial）。
+        listLimit: 50000
+        # 单次读 ACL 的超时（毫秒）。
+        scanTimeoutMs: 60000
+        # 服务就绪等多久（毫秒）：超时后用父 ctx 兜一次（与 dsh-milieu 的 agentLoopWaitMs 同一手法）。
+        readyWaitMs: 10000
+        # 工作区打开后第一次扫描是否自动跑。手动重扫不怕失败，自动扫描只做一次。
+        scanOnMount: true

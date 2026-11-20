@@ -1,0 +1,6 @@
+# 插件仓库统一 LF（dsh-milieu 的 CONVENTION §5 同一条）：Git 会自动转行尾，不要关它。
+* text=auto eol=lf
+# PowerShell 脚本保持 CRLF：PS 5.1 对 LF 的 .ps1 有时读不出行首（宁可保守）。
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.sh text eol=lf

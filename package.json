@@ -1,0 +1,58 @@
+{
+  "name": "dsh-veneer",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "工作区物化保底：检测工作区既有对象是否缺了沙箱物化三项（能力 ACE / Everyone 拒删子项 / Low 标签），出报告，并生成一条需要用户在宿主外提权执行的修复命令。只检测，不在沙箱内改 ACL。",
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "windows",
+    "acl",
+    "sandbox",
+    "workspace"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "adapter",
+    "core",
+    "model",
+    "exception",
+    "config",
+    "constant",
+    "utils",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0-0 <0.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "comment": {
+    "scope": "**只检测 + 报告 + 生成命令**。插件跑在沙箱内，受限进程改不了安全描述符（实测：令牌只有 SeChangeNotifyPrivilege，icacls /setintegritylevel 在可写目录里也被拒）。所以执行的那一半是 scripts/dsh-veneer-apply.ps1，由用户在宿主外提权执行；插件只把命令交出去。",
+    "host-only": "没有界面半边（无 `dsh.client`）：一期不做 UI，报告落在工作区文件里，命令打在日志里。",
+    "windows": "Windows-only；非 Windows 平台挂载即报告 unsupported 并卸载，不做任何事。",
+    "files": "白名单 = 包里到底有什么。`scripts/` 是执行侧脚本，必须进包——生成给用户的命令指向它。",
+    "no-deps": "零运行时依赖（不用 schemastery）：配置走补丁层 + 代码默认值，避免再引一个要打包的依赖。"
+  }
+}

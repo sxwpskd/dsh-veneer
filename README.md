@@ -101,16 +101,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<包目录>\scripts\dsh-ven
 ## 结构
 
 ```
-plugin/dsh-veneer/plugin/
-├── index.js                  # 入口：按 workspaces 挂 child fiber（一个工作区一个实例）
-├── core/                     # 纯逻辑：判缺 / 报告 / 命令 / 采集 / 落盘 / 扫描编排 / 工作区实例
-├── adapter/                  # 宿主与服务的外部边界（唯一出现宿主服务名；唯一起子进程的地方）
-├── model/                    # 数据形状（签名 / 报告版本 / 状态词）
-├── config/                   # 默认值 + 深合并（`0` / `''` / `false` 是合法值）
-├── exception/                # 稳定错误码 / 统一结果 / 异常边界
-├── log/                      # 极简日志（宿主 logger + 控制台兜底，不建日志文件）
-├── scripts/                  # **给提权执行的那一半**（只读探针 + apply/restore）
-└── tools/                    # 开发脚本（边界检查 / 干跑），不进发布
+plugin/dsh-veneer/plugin/        ← 本仓库的根（一个包一层，远端是 github.com/sxwpskd/dsh-veneer）
+├── index.js                     # 入口：按 workspaces 挂 child fiber（一个工作区一个实例）
+├── core/                        # 纯逻辑：判缺 / 报告 / 命令 / 采集 / 落盘 / 扫描编排 / 工作区实例
+├── adapter/                     # 宿主与服务的外部边界（唯一出现宿主服务名；唯一起子进程的地方）
+├── model/                       # 数据形状（签名 / 报告版本 / 状态词）
+├── config/                      # 默认值 + 深合并（`0` / `''` / `false` 是合法值）
+├── exception/                   # 稳定错误码 / 统一结果 / 异常边界
+├── log/                         # 极简日志（宿主 logger + 控制台兜底，不建日志文件）
+├── scripts/                     # **给提权执行的那一半**（只读探针 + apply/restore）
+├── tests/                       # 空目录占位（测试在工作区 tools/，见 tests/README.md）
+└── tools/                       # 开发脚本（边界检查 / 干跑），不进发布
 ```
 
 `tools/check.mjs` 会查"宿主服务名只出现在 `adapter/`"和"本机路径不许进插件"。
+
+## 开发
+
+- **测试不在包里**：工作区的 `tools/veneer-test.mjs`（离线 95 项）与 `tools/windows-live-test.mjs`（真机只读 12 项），唯一入口 `node tools/run-tests.mjs`。
+- **想先看结论不跑插件**：`node tools/dryrun.mjs --root <工作区>`（只读，不写盘）。
+- 行尾：源码 LF；`.ps1` 保持 CRLF（`.gitattributes` 钉住）。
+

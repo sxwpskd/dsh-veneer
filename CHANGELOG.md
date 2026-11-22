@@ -1,5 +1,15 @@
 # 更新日志
 
+## 0.2.2 — 2026-11-22
+
+修 **0.2.1 装到别处就起不来**的发布缺陷：`package.json` 的 `files` 白名单从一开始就漏了 `log/`（这次也补上 `ui/`）。
+pnpm 按白名单打包 git 依赖，所以从 GitHub 装下来的包里没有 `log/logger.js`，宿主激活时报
+`Cannot find module ...\log\logger.js`。本地 link 安装不受影响，因此一直在本机"看不出问题"。
+
+- `files` 增加 `log`、`ui`。
+- `tools/check.mjs` 加一条静态检查：**白名单展开后的文件集合必须覆盖所有相对 import**；
+  用 0.2.1 的装好的包跑，它会准确列出 `./log/logger.js`、`../log/logger.js`、`./ui/config-page.js` 三处。
+
 ## 0.2.1 — 2026-11-20
 
 修复 0.2.0 在真机上**完全没起来**的两处缺陷（都不是平台的问题）：

@@ -5,12 +5,17 @@
 //      报路径时只打印相对根的路径。
 //
 // 用法：node tools/check.mjs [目录]    （默认检查本包根）
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, extname, dirname, resolve } from 'node:path';
+import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { join, extname, dirname, resolve, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] ? resolve(process.argv[2]) : join(HERE, '..');
+
+/** 小工具：白名单展开时容错读（缺路径要报成检查失败，不要抛）。 */
+const existsSyncSafe = (p) => existsSync(p);
+const statSafe = (p) => { try { return statSync(p); } catch { return null; } };
+const readdirSafe = (p) => { try { return readdirSync(p); } catch { return []; } };
 const SKIP = new Set(['adapter', 'tests', 'tools', 'scripts', 'lib', 'node_modules', '.git']);
 const SKIP_EXT = new Set(['.ps1', '.md', '.json', '.yml', '.yaml']);
 const FORBIDDEN = [
@@ -68,6 +73,49 @@ try {
   }
 } catch (err) {
   if (!(err && err.code === 'ENOENT')) throw err;
+}
+
+// ④ **files 白名单必须覆盖运行时的相对 import 闭包**（2026-11-22 真机事故）
+//    `files` 里漏了 `log/`，pnpm 按白名单打包 git 依赖 → 装好的包没有 `log/logger.js` →
+//    宿主激活时 `Cannot find module .../log/logger.js`。这里把"装出来的包能不能 import 通"
+//    变成静态检查：白名单展开后的文件集合，必须包含所有被它们相对引用到的文件。
+{
+  let pkg;
+  try { pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')); } catch { pkg = null; }
+  if (pkg && Array.isArray(pkg.files)) {
+    const shipped = new Set();
+    const addPath = (rel) => {
+      const p = join(ROOT, rel);
+      if (!existsSyncSafe(p)) { hits.push({ file: 'package.json', needle: rel, why: '白名单里的路径不存在' }); return; }
+      const st = statSafe(p);
+      if (st && st.isDirectory()) {
+        for (const name of readdirSafe(p)) addPath(rel.replace(/\/$/, '') + '/' + name);
+      } else {
+        shipped.add(rel.replace(/\\/g, '/'));
+      }
+    };
+    for (const entry of pkg.files) addPath(String(entry));
+    const importsOf = (file) => {
+      const text = readFileSync(join(ROOT, file), 'utf8');
+      const specs = [];
+      for (const m of text.matchAll(/from\s+['"](\.[^'"]+)['"]/g)) specs.push(m[1]);
+      for (const m of text.matchAll(/^\s*import\s+['"](\.[^'"]+)['"]/gm)) specs.push(m[1]);
+      return specs;
+    };
+    for (const file of shipped) {
+      if (!['.js', '.mjs'].includes(extname(file))) continue;
+      for (const spec of importsOf(file)) {
+        const target = normalize(join(dirname(file), spec)).replace(/\\/g, '/');
+        if (!shipped.has(target)) {
+          hits.push({
+            file: file,
+            needle: spec,
+            why: '被引用的文件不在 files 白名单里：装出来的包会 Cannot find module（把它的目录加进 files）',
+          });
+        }
+      }
+    }
+  }
 }
 
 if (hits.length) {

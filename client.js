@@ -8,6 +8,7 @@
 //   由工作区工具 `tools/build-veneer-client.mjs` 从本文件 + `ui/*.js` + 它们的相对依赖拼接生成。
 //   改界面源码后必须重新生成，否则跑的是旧代码。
 import { createClientPlugin, CLIENT_INJECT } from './ui/config-page.js';
+import { createLog } from './log/logger.js';
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__ && typeof window.__ModuleLoader__.load === 'function') {
   window.__ModuleLoader__.load({
@@ -17,7 +18,9 @@ if (typeof window !== 'undefined' && window.__ModuleLoader__ && typeof window.__
       return {
         inject: CLIENT_INJECT,
         apply(ctx) {
-          const plugin = createClientPlugin({ React, ctx });
+          // 客户端日志：浏览器拿不到文件系统 → 只有内存环形缓冲（面板里显示最近几条）。
+          const log = createLog(null, { memoryLimit: 120 });
+          const plugin = createClientPlugin({ React, ctx, log });
           return plugin.apply(ctx);
         },
       };

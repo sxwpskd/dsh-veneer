@@ -1,5 +1,21 @@
 # 更新日志
 
+## 0.3.0 — 2026-11-22
+
+按脚手架补齐**日志层**（plugin/_scaffold/log/README.md），并修客户端读文件的错误契约：
+
+- **日志层**（新增 LOG-SCHEMA.md）：\log/schema.js\ 事件表/级别/截断；\log/file-sink.js\ 写
+  \<工作区>/.dsh-veneer/veneer.log\（JSONL、1 MiB 轮转、保留 2 份、失败禁用并报告一次）；
+  \log/memory-sink.js\ 200 条环形缓冲；\log/logger.js\ 门面（宿主 logger + 内存 + 文件 sink，永不抛）；
+  \log/shared.js\ 装配（一个进程一个日志口；根没解析出来时先落系统临时目录的**引导日志**，根出来再换成工作区文件）。
+- **客户端只读展示的调试行**：面板显示最近 6 条客户端日志（内存缓冲），读失败原因也进日志。
+- **修读取契约**：\workspaceFiles.read\ 是 \ead(sessionId, path, range, signal)\（错误信息原文：
+  "expected 3 business argument(s) plus an optional AbortSignal"）。改用 \useSessions\ 快照取 SessionId 后按 3 参读；
+  先读小摘要 \eview/veneer-summary.json\，再退整份报告；每次尝试的原因都显示在面板上。
+- **宿主挂载改成"先同步解析根"**：实例 fiber 已声明工作区服务依赖，通常挂载即就绪；解析失败也**进日志**（不再静默），
+  然后才走 \ctx.inject\ 等待 + 兜底定时器。
+- 测试：新增日志层套件（107 项）+ 实例日志落盘回归（veneer 123 项），全套 **19 套 / 约 1828 项全绿**。
+
 ## 0.2.4 — 2026-11-22
 
 把"**宿主那一半到底跑到哪一步**"变成可查的事实（上一版只能靠猜）：

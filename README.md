@@ -108,7 +108,7 @@ plugin/dsh-veneer/plugin/        ← 本仓库的根（一个包一层，远端�
 ├── model/                       # 数据形状（签名 / 报告版本 / 状态词）
 ├── config/                      # 默认值 + 深合并（`0` / `''` / `false` 是合法值）
 ├── exception/                   # 稳定错误码 / 统一结果 / 异常边界
-├── log/                         # 极简日志（宿主 logger + 控制台兜底，不建日志文件）
+├── log/                         # 日志层（JSONL 文件 sink + 内存环；规范见 LOG-SCHEMA.md）
 ├── scripts/                     # **给提权执行的那一半**（只读探针 + apply/restore）
 ├── tests/                       # 空目录占位（测试在工作区 tools/，见 tests/README.md）
 └── tools/                       # 开发脚本（边界检查 / 干跑），不进发布

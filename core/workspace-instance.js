@@ -9,7 +9,7 @@ import { createAclReader } from '../adapter/acl.js';
 import { createFs } from '../adapter/fs.js';
 import { createDsh, WORKSPACE_DEPENDENCIES } from '../adapter/dsh.js';
 import { revealInExplorer, resolveInsideRoot } from '../adapter/desktop.js';
-import { createLog } from '../log/logger.js';
+import { attachBootstrapLog, attachWorkspaceLog, sharedLog } from '../log/shared.js';
 import { withDefaults } from '../config/defaults.js';
 import { packageDirOf, scriptPathOf, INSPECT_SCRIPT } from '../core/command-path.js';
 import { scanOnce, resolveRoot as resolveRootOf } from '../core/scan-once.js';
@@ -31,7 +31,7 @@ export const workspacePlugin = {
   inject: WORKSPACE_DEPENDENCIES,
   apply(ctx, rawConfig) {
     const cfg = withDefaults(rawConfig);
-    const log = createLog((() => { try { return ctx && ctx.logger; } catch { return null; } })());
+    const log = sharedLog((() => { try { return ctx && ctx.logger; } catch { return null; } })());
     const fs = createFs();
     let disposed = false;
     let fallbackTimer = null;
@@ -44,6 +44,7 @@ export const workspacePlugin = {
     })() || OWN_PACKAGE_DIR;
 
     const host = createDsh(ctx, packageDir);
+    log.event('instance.mount', '工作区实例启动', { scanOnMount: !!cfg.scanOnMount, bridge: !!cfg.bridge });
     log.info('实例 apply 进入：scanOnMount=' + cfg.scanOnMount + '，bridge=' + cfg.bridge
       + '，workspaceRoot=' + JSON.stringify(cfg.workspaceRoot || ''));
     const scanner = createScanner({
@@ -61,19 +62,27 @@ export const workspacePlugin = {
     /** 一次扫描（挂载时用）。 */
     const once = (h, source) => {
       if (disposed) return;
-      log.info('开始扫描（' + source + '）');
+      log.event('scan.started', '开始扫描（' + source + '）', { source });
       guardSync('挂载扫描', () => {
         scanOnce({ host: h, fs, timeoutMs: cfg.scanTimeoutMs, listLimit: cfg.listLimit }, cfg)
           .then((result) => {
             if (!result || result.ok !== true) {
-              log.warn('扫描没完成（' + source + '）：' + (result && result.reason ? result.reason : '未知原因'));
+              const reason = (result && result.reason) || '未知原因';
+              log.event('scan.failed', '扫描没完成（' + source + '）：' + reason, { reason, source });
               return;
             }
-            log.info('扫描完成（' + source + '）：' + result.value.summary
-              + (result.value.written ? '；报告已更新：' + result.value.reportPath : '；报告没变'));
+            log.event('scan.done', '扫描完成（' + source + '）：' + result.value.summary, {
+              source,
+              status: result.value.status || 'unknown',
+              written: !!result.value.written,
+              reportPath: result.value.reportPath || '',
+            });
             if (result.value.command) log.info('需要修的话，在提权的 PowerShell 里跑：' + result.value.command);
           })
-          .catch((err) => { log.warn('扫描失败（' + source + '）：' + String((err && err.message) || err)); });
+          .catch((err) => {
+            const reason = String((err && err.message) || err);
+            log.event('scan.failed', '扫描失败（' + source + '）：' + reason, { reason, source });
+          });
         return true;
       }, { log, blockedBy: 'host', code: CODES.HOST_CALL_FAILED });
     };
@@ -82,7 +91,12 @@ export const workspacePlugin = {
     const startBridge = (h, source) => {
       if (disposed || bridge) return;
       const resolved = resolveRootOf(h, cfg.workspaceRoot);
-      if (!resolved.ok) { log.warn('手动入口没起来（' + source + '）：' + resolved.reason); return; }
+      if (!resolved.ok) {
+        log.event('bridge.failed', '手动入口没起来（' + source + '）：' + resolved.reason, { reason: resolved.reason, source });
+        return;
+      }
+      // 根已经知道：日志从现在起写进工作区（内存里之前的事件会补写过去）。
+      attachWorkspaceLog(log, fs, resolved.value);
       bridge = createBridge({
         fs,
         root: resolved.value,
@@ -99,34 +113,48 @@ export const workspacePlugin = {
       bridge.start();
       watch = fs.watchDir(bridge.paths.dir, () => { void bridge.tick(); });
       if (!watch.ok) log.warn('桥不能用文件监视（' + watch.reason + '），改为只按 ' + cfg.bridgePollMs + ' ms 轮询');
-      log.info('手动入口已就绪（' + source + '）：' + bridge.paths.dir);
+      log.event('bridge.started', '手动入口已就绪（' + source + '）', { dir: bridge.paths.dir, source });
     };
 
     if (cfg.scanOnMount || cfg.bridge) {
-      const canInject = host.canInject();
-      log.info('等服务就绪：canInject=' + canInject);
-      if (canInject) {
-        // **回调拿到的是适配层对象，不是原始 ctx**（`adapter/dsh.js` 的 `awaitWorkspace` 已经包过一次）。
-        // 再 `createDsh(child)` 就是二次包装：适配层对象上没有宿主服务属性 → 解析不到工作区根 →
-        // 扫描与手动入口全部静默不启动（2026-11-20 真机踩到，v0.2.0 的面板因此从没出现过）。
-        fiber = guardSync('等工作区服务', () => host.awaitWorkspace((child) => {
-          log.info('注入回调已触发（工作区服务就绪）');
-          if (cfg.scanOnMount) once(child, 'inject');
-          if (cfg.bridge) startBridge(child, 'inject');
-        }), { log, blockedBy: 'host', code: CODES.HOST_CALL_FAILED });
-        // 兜底：服务始终没就绪时，用父 ctx 试一次（同样只读）。
-        try {
-          fallbackTimer = setTimeout(() => {
-            if (disposed) return;
-            log.info('兜底定时器触发（' + cfg.readyWaitMs + ' ms 内没等到注入回调）：用父 ctx 再试一次');
-            if (cfg.scanOnMount) once(createDsh(ctx, packageDir), 'fallback');
-            if (cfg.bridge) startBridge(createDsh(ctx, packageDir), 'fallback');
-          }, cfg.readyWaitMs);
-          if (fallbackTimer && typeof fallbackTimer.unref === 'function') fallbackTimer.unref();
-        } catch { /* 没有 setTimeout 的宿主：不兜底 */ }
-      } else {
+      // 引导日志：根还没解析出来时，至少能看到"实例起来了、卡在哪一步"。
+      attachBootstrapLog(log, fs);
+      // 实例 fiber 已经把"工作区服务"声明成依赖，服务通常此刻就绪：先**同步**试一次根，
+      // 省掉等注入回调的延迟；失败也要落到日志（不能像 0.2.x 那样静默）。
+      const early = resolveRootOf(host, cfg.workspaceRoot);
+      if (early.ok) {
+        log.event('root.resolved', '工作区根已解析：' + early.value, { root: early.value });
         if (cfg.scanOnMount) once(host, 'mount');
         if (cfg.bridge) startBridge(host, 'mount');
+      } else {
+        log.event('root.resolve.failed', '工作区根没解析出来：' + early.reason, { reason: early.reason });
+        const canInject = host.canInject();
+        log.event('host.inject.waiting', '等工作区服务就绪', { canInject });
+        if (canInject) {
+          // **回调拿到的是适配层对象，不是原始 ctx**（`adapter/dsh.js` 的 `awaitWorkspace` 已经包过一次）。
+          // 再 `createDsh(child)` 就是二次包装：适配层对象上没有宿主服务属性 → 解析不到工作区根 →
+          // 扫描与手动入口全部静默不启动（2026-11-20 真机踩到，v0.2.0 的面板因此从没出现过）。
+          fiber = guardSync('等工作区服务', () => host.awaitWorkspace((child) => {
+            const resolved = resolveRootOf(child, cfg.workspaceRoot);
+            if (resolved.ok) attachWorkspaceLog(log, fs, resolved.value);
+            log.event('host.inject.ready', '注入回调已触发（工作区服务就绪）', {});
+            if (cfg.scanOnMount) once(child, 'inject');
+            if (cfg.bridge) startBridge(child, 'inject');
+          }), { log, blockedBy: 'host', code: CODES.HOST_CALL_FAILED });
+          // 兜底：服务始终没就绪时，用父 ctx 试一次（同样只读）。
+          try {
+            fallbackTimer = setTimeout(() => {
+              if (disposed) return;
+              log.event('host.inject.fallback', '兜底定时器触发：用父 ctx 再试一次', { waitedMs: cfg.readyWaitMs });
+              if (cfg.scanOnMount) once(createDsh(ctx, packageDir), 'fallback');
+              if (cfg.bridge) startBridge(createDsh(ctx, packageDir), 'fallback');
+            }, cfg.readyWaitMs);
+            if (fallbackTimer && typeof fallbackTimer.unref === 'function') fallbackTimer.unref();
+          } catch { /* 没有 setTimeout 的宿主：不兜底 */ }
+        } else {
+          if (cfg.scanOnMount) once(host, 'mount');
+          if (cfg.bridge) startBridge(host, 'mount');
+        }
       }
     }
 

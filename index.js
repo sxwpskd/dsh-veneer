@@ -14,7 +14,8 @@
 //   （用户自己创建的认知材料不该被插件悄悄删掉），要清就删 `review/veneer-state.json`。
 import { planWorkspaces } from './core/plan.js';
 import { workspacePlugin } from './core/workspace-instance.js';
-import { createLog } from './log/logger.js';
+import { createFs } from './adapter/fs.js';
+import { attachBootstrapLog, sharedLog } from './log/shared.js';
 import { guardSync } from './exception/guard.js';
 import { CODES } from './exception/codes.js';
 
@@ -65,7 +66,8 @@ function mountChild(ctx, childConfig, packageDir) {
  * @returns {Function} 清理函数（dispose 每个 child fiber）
  */
 export function apply(ctx, config) {
-  const log = createLog(hostLoggerOf(ctx));
+  // 一个进程一个日志口（与工作区实例共用）；宿主 logger 有就同时转过去。
+  const log = sharedLog(hostLoggerOf(ctx));
   let childCleanups = [];
   let disposed = false;
 
@@ -77,14 +79,17 @@ export function apply(ctx, config) {
     }
   };
 
+  // 诊断（2026-11-22）：先挂**引导日志**（系统临时目录）。根解析出来后，实例会把它换成
+  // `<工作区>/.dsh-veneer/veneer.log`，内存里的历史补写过去——所以"根没解析出来"也有现场。
+  try { attachBootstrapLog(log, createFs()); } catch { /* 引导日志挂不上也不影响主流程 */ }
+
   const platform = typeof process !== 'undefined' && process.platform ? process.platform : '';
+  log.event('host.mount', '宿主半边启动', { platform: platform || 'unknown' });
   if (platform !== 'win32') {
     log.warn('不是 Windows（' + (platform || 'unknown') + '）：物化三项是 NTFS 语义，本插件不做任何事');
     return () => {};
   }
 
-  // 诊断（2026-11-22）：真机上出现过"行是 active，但工作区里什么都没发生"。这两行必须先落地，
-  // 之后的每一步也都有对应日志；全部同时写进系统临时目录的 dsh-veneer-host.log。
   log.info('apply 进入：platform=' + platform + '，config=' + JSON.stringify(config || {}));
 
   const plan = planWorkspaces(config);
@@ -92,6 +97,7 @@ export function apply(ctx, config) {
     log.warn('工作区配置无效，本次不挂载任何实例：' + plan.errors.join('；'));
     return () => {};
   }
+  log.event('host.plan', '规划完成：要挂 ' + plan.children.length + ' 个实例', { children: plan.children.length });
   log.info('规划完成：要挂 ' + plan.children.length + ' 个实例（'
     + plan.children.map((c) => c.path || '默认实例').join(' / ') + '）');
 

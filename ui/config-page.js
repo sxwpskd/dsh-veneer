@@ -14,6 +14,7 @@
 //   · 只读文件用 `remote.workspaceFiles.read(path, {}, signal)`（官方两参形状；老代码写过三参）；
 //   · 不写 DOM、不 import Harness 客户端包、只用 `--dsw-alias-*` token。
 import { REPORT_REL_PATH } from '../model/acl.js';
+import { createLog } from '../log/logger.js';
 
 /** 客户端要注入的服务：只用远端命名空间（已声明过的），不碰别的。 */
 export const CLIENT_INJECT = ['slots', 'remote', 'remote.workspaceFiles'];
@@ -77,44 +78,67 @@ export function describeMissing(report) {
 }
 
 /**
- * 造客户端插件。
- * @param {{React:object, ctx:object}} input
+ * 从 `useSessions` 的快照里取 Session id（读文件必须带一个：Remote 的 `read` 是
+ * `read(sessionId, path, range, signal)`，第一个参数是**会话身份**，用来解析工作区根）。
+ * 真实形状是 `{ ids: SessionId[], byId, phase, projectionsBySession }`；这里只认 ids/byId 两种。
  */
-export function createClientPlugin({ React, ctx }) {
-  const closureReact = React;
+export function sessionIdsOf(snapshot, limit = 12) {
+  if (!snapshot || typeof snapshot !== 'object') return [];
+  const raw = Array.isArray(snapshot.ids)
+    ? snapshot.ids
+    : (snapshot.byId && typeof snapshot.byId === 'object' ? Object.keys(snapshot.byId) : []);
+  return raw.filter((id) => typeof id === 'string' && id).slice(0, limit);
+}
 
-  /** 读一次报告文件。读不到是正常情况（还没扫过），不抛；失败原因攒起来给面板显示。 */
-  const readReport = async () => {
+/**
+ * 造客户端插件。
+ * @param {{React:object, ctx:object, log?:object}} input `log` 由 `client.js` 传入（内存环形缓冲）；
+ *   不传时自己造一个（浏览器里没有宿主 logger，正好只用内存 + 控制台）。
+ */
+export function createClientPlugin({ React, ctx, log }) {
+  const closureReact = React;
+  // 客户端日志：拿不到文件系统 → 内存环形缓冲（脚手架要求），面板把它当"诊断日志"显示。
+  const logger = log || createLog(null, { memoryLimit: 120 });
+
+  /**
+   * 读报告。**必须带 sessionId**（2026-11-22 真机报错证实：Remote 只接受 3 个业务参数 + signal）。
+   * 一个工作区可能有好几个会话，逐个试；读不到就退回"还没扫"。
+   * @param {string[]} sessionIds
+   */
+  const readReport = async (sessionIds) => {
     let files;
     try { files = ctx && ctx.remote && ctx.remote.workspaceFiles; } catch { files = null; }
     if (!files || typeof files.read !== 'function') {
       return { ok: false, reason: '没有文件读通道（remote.workspaceFiles 不可用）', tried: [] };
     }
+    const ids = Array.isArray(sessionIds) ? sessionIds : [];
+    if (!ids.length) {
+      const reason = '界面还拿不到会话（读文件需要一个 SessionId）';
+      try { logger.event('ui.read.failed', reason, { path: SUMMARY_REL }); } catch { /* 日志坏了不影响面板 */ }
+      return { ok: false, reason, tried: [] };
+    }
     const signal = typeof AbortSignal !== 'undefined' && AbortSignal.timeout
       ? AbortSignal.timeout(8000) : undefined;
-    // 先读小摘要（几 KB，真机更稳），再退到整份报告。
-    const filesToTry = [SUMMARY_REL, REPORT_REL_PATH];
     const tried = [];
-    for (const rel of filesToTry) {
-      const attempts = [
-        ['read(path)', () => files.read(rel, {}, signal)],
-        ['read(path, opts)', () => files.read(rel, {})],
-      ];
-      for (const [label, call] of attempts) {
+    // 先读小摘要（几 KB），再退到整份报告；同一会话内失败就换下一个会话。
+    for (const rel of [SUMMARY_REL, REPORT_REL_PATH]) {
+      for (const sessionId of ids) {
         try {
-          const res = await call();
+          const res = await files.read(sessionId, rel, {}, signal);
           const value = res && res.ok === true && res.value !== undefined ? res.value : res;
           const text = typeof value === 'string'
             ? value
             : (value && typeof value.text === 'string' ? value.text : null);
-          if (text === null) { tried.push(rel + ' ' + label + '：返回形状没有 text'); continue; }
+          if (text === null) { tried.push(rel + ' @' + sessionId.slice(-6) + '：返回形状没有 text'); continue; }
           const parsed = JSON.parse(text);
-          if (parsed && typeof parsed === 'object') return { ok: true, report: parsed, from: rel };
+          if (parsed && typeof parsed === 'object') return { ok: true, report: parsed, from: rel, sessionId };
         } catch (err) {
-          tried.push(rel + ' ' + label + '：' + String((err && err.message) || err).slice(0, 120));
+          tried.push(rel + ' @' + String(sessionId).slice(-6) + '：'
+            + String((err && err.message) || err).slice(0, 120));
         }
       }
     }
+    try { logger.event('ui.read.failed', '读不到报告（' + tried.length + ' 次尝试都失败）', { path: SUMMARY_REL }); } catch { /* 日志坏了不影响面板 */ }
     return { ok: false, reason: '读不到报告（宿主可能还没扫）', tried };
   };
 
@@ -122,11 +146,15 @@ export function createClientPlugin({ React, ctx }) {
     const R = (props && props.React) || closureReact;
     if (!R || typeof R.createElement !== 'function' || typeof R.useState !== 'function') return null;
     const e = R.createElement;
+    // 行配置 slot 的标准 props 里有 `useSessions`（快照钩子）。它必须**无条件**调用（hooks 规则）。
+    const useSessions = props && props.useSessions;
+    const sessions = typeof useSessions === 'function' ? useSessions((s) => s) : null;
+    const sessionIds = sessionIdsOf(sessions);
     const [state, setState] = R.useState({ phase: 'init', text: '正在读报告…', tone: 'muted', report: null });
 
     const load = async () => {
       setState({ phase: 'loading', text: '正在读报告…', tone: 'muted', report: null, tried: [] });
-      const got = await readReport();
+      const got = await readReport(sessionIds);
       if (!got.ok) {
         setState({ phase: 'none', text: got.reason, tone: 'muted', report: null, tried: got.tried || [] });
         return;
@@ -143,6 +171,15 @@ export function createClientPlugin({ React, ctx }) {
     const details = report ? describeMissing(report) : [];
     const scannedAt = report && typeof report.scannedAt === 'number'
       ? new Date(report.scannedAt).toLocaleString() : '';
+    const diagLines = (() => {
+      try {
+        return (logger.logs(6) || []).map((entry) => String(entry && entry.ts ? entry.ts : '')
+          + ' ' + String(entry && entry.level ? entry.level : '')
+          + ' ' + String(entry && (entry.event || entry.message) ? (entry.event || entry.message) : ''));
+      } catch {
+        return [];
+      }
+    })();
 
     return e('div', {
       style: {
@@ -177,6 +214,16 @@ export function createClientPlugin({ React, ctx }) {
           key: 'tried',
           style: { fontSize: 12, color: TOKENS.muted, whiteSpace: 'pre-wrap', fontFamily: 'monospace' },
         }, state.tried.join('\n'))
+        : null,
+      // 客户端诊断日志（内存环形缓冲；脚手架要求"拿不到文件系统时退回内存 + 界面调试行"）。
+      diagLines.length
+        ? e('pre', {
+          key: 'diag',
+          style: {
+            fontSize: 11, color: TOKENS.muted, whiteSpace: 'pre-wrap', margin: 0,
+            maxHeight: 120, overflow: 'auto', fontFamily: 'monospace',
+          },
+        }, '诊断日志（最近 ' + diagLines.length + ' 条）：\n' + diagLines.join('\n'))
         : null,
     ].filter(Boolean));
   };

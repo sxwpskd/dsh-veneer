@@ -15,6 +15,12 @@ export const ITEM = Object.freeze({
 /** 报告版本：形状一变就升（执行侧脚本与将来的 UI 读它）。 */
 export const REPORT_VERSION = 1;
 
+/**
+ * 报告在工作区里的**默认相对路径**（宿主写、面板读）。
+ * 只此一处：`config/defaults.js` 与界面半边都引它，别各写一份。
+ */
+export const REPORT_REL_PATH = 'review/veneer-state.json';
+
 /** 三种整体状态。 */
 export const STATUS = Object.freeze({
   OK: 'ok',             // 根齐、子树也都齐

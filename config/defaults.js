@@ -6,13 +6,15 @@
 // 这里**不声明 Config / schemastery**：配置走补丁层 + 代码默认值。理由与 dsh-milieu 相反——
 // 那个插件的配置项多到需要表单；这个只有 6 个键，多引一个要打包的依赖不划算。
 
+import { REPORT_REL_PATH } from '../model/acl.js';
+
 export const DEFAULT_CONFIG = {
   // 工作区根。空 = 由平台 / `workspaces` 决定。
   workspaceRoot: '',
   // 多工作区：每项 `{ path }` 挂一个 child fiber；空数组 = 单工作区兼容。
   workspaces: [],
   // 报告写在**工作区里**的相对路径（相对根）。**不要写进 dsh-milieu 的状态文件**。
-  reportPath: 'review/veneer-state.json',
+  reportPath: REPORT_REL_PATH,
   // 一次扫描最多列多少个对象（防超大工作区把时间吃光；超了报告 `partial`）。
   listLimit: 50000,
   // 单次读 ACL 的超时（毫秒）。大工作区实测 900 个对象约 5 秒，6 万给足余量。

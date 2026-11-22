@@ -44,6 +44,8 @@ export const workspacePlugin = {
     })() || OWN_PACKAGE_DIR;
 
     const host = createDsh(ctx, packageDir);
+    log.info('实例 apply 进入：scanOnMount=' + cfg.scanOnMount + '，bridge=' + cfg.bridge
+      + '，workspaceRoot=' + JSON.stringify(cfg.workspaceRoot || ''));
     const scanner = createScanner({
       acl: createAclReader({
         scriptPath: scriptPathOf(packageDir, INSPECT_SCRIPT),
@@ -59,6 +61,7 @@ export const workspacePlugin = {
     /** 一次扫描（挂载时用）。 */
     const once = (h, source) => {
       if (disposed) return;
+      log.info('开始扫描（' + source + '）');
       guardSync('挂载扫描', () => {
         scanOnce({ host: h, fs, timeoutMs: cfg.scanTimeoutMs, listLimit: cfg.listLimit }, cfg)
           .then((result) => {
@@ -100,11 +103,14 @@ export const workspacePlugin = {
     };
 
     if (cfg.scanOnMount || cfg.bridge) {
-      if (host.canInject()) {
+      const canInject = host.canInject();
+      log.info('等服务就绪：canInject=' + canInject);
+      if (canInject) {
         // **回调拿到的是适配层对象，不是原始 ctx**（`adapter/dsh.js` 的 `awaitWorkspace` 已经包过一次）。
         // 再 `createDsh(child)` 就是二次包装：适配层对象上没有宿主服务属性 → 解析不到工作区根 →
         // 扫描与手动入口全部静默不启动（2026-11-20 真机踩到，v0.2.0 的面板因此从没出现过）。
         fiber = guardSync('等工作区服务', () => host.awaitWorkspace((child) => {
+          log.info('注入回调已触发（工作区服务就绪）');
           if (cfg.scanOnMount) once(child, 'inject');
           if (cfg.bridge) startBridge(child, 'inject');
         }), { log, blockedBy: 'host', code: CODES.HOST_CALL_FAILED });
@@ -112,6 +118,7 @@ export const workspacePlugin = {
         try {
           fallbackTimer = setTimeout(() => {
             if (disposed) return;
+            log.info('兜底定时器触发（' + cfg.readyWaitMs + ' ms 内没等到注入回调）：用父 ctx 再试一次');
             if (cfg.scanOnMount) once(createDsh(ctx, packageDir), 'fallback');
             if (cfg.bridge) startBridge(createDsh(ctx, packageDir), 'fallback');
           }, cfg.readyWaitMs);

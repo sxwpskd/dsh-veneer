@@ -27,18 +27,61 @@ export function persistReport(deps, options) {
   try {
     if (deps.fs.exists(path)) {
       const before = deps.fs.readText(path);
-      if (sameShape(before, next)) return ok({ written: false, path });
+      if (sameShape(before, next)) {
+        // 内容没变也要保证摘要存在（旧版本可能只写过大报告）。
+        try {
+          deps.fs.writeTextAtomic(joinPath(root, summaryRelOf(rel)), JSON.stringify(summarizeForPanel(report), null, 2) + '\n');
+        } catch { /* 摘要写不了不影响报告 */ }
+        return ok({ written: false, path });
+      }
     }
   } catch {
     // 旧报告读不了（坏 JSON / 权限）：照样覆盖，不因为旧文件坏了就不写新结论。
   }
 
+  let written = false;
   try {
     deps.fs.writeTextAtomic(path, next);
+    written = true;
   } catch (err) {
     return fail('写报告失败：' + String((err && err.message) || err), 'fs', CODES.FS_WRITE_FAILED);
   }
-  return ok({ written: true, path });
+  // 再写一份**小摘要**（2026-11-22）：插件页的面板只需要结论 + 几条缺项，
+  // 读整份报告（几百 KB）在真机上不稳，读这份（几 KB）就够。
+  try {
+    const summaryPath = joinPath(root, summaryRelOf(rel));
+    deps.fs.writeTextAtomic(summaryPath, JSON.stringify(summarizeForPanel(report), null, 2) + '\n');
+  } catch { /* 摘要写不了不影响报告 */ }
+  return ok({ written, path });
+}
+
+/** `review/veneer-state.json` → `review/veneer-summary.json`（同目录、换名）。 */
+export function summaryRelOf(reportRel) {
+  const rel = String(reportRel || '');
+  const cut = rel.lastIndexOf('/');
+  const dir = cut >= 0 ? rel.slice(0, cut + 1) : '';
+  return dir + 'veneer-summary.json';
+}
+
+/** 报告 → 面板要的那几行。**故意小**：状态、计数、时间、最多 5 条缺项。 */
+export function summarizeForPanel(report) {
+  const r = report && typeof report === 'object' ? report : {};
+  const objects = Array.isArray(r.objects) ? r.objects : [];
+  const missing = objects.slice(0, 5).map((o) => ({
+    path: String((o && o.path) || ''),
+    isDir: !!(o && o.isDir),
+    missing: Array.isArray(o && o.missing) ? o.missing : [],
+  }));
+  return {
+    version: 1,
+    status: String(r.status || 'unknown'),
+    counts: r.counts || {},
+    scannedAt: typeof r.scannedAt === 'number' ? r.scannedAt : null,
+    generatedAt: String(r.generatedAt || ''),
+    summary: String(r.summary || ''),
+    missing,
+    more: Math.max(0, objects.length - missing.length),
+  };
 }
 
 /** 路径拼接（只接受相对路径：报告不许写到工作区外）。 */

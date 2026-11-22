@@ -83,11 +83,18 @@ export function apply(ctx, config) {
     return () => {};
   }
 
+  // 诊断（2026-11-22）：真机上出现过"行是 active，但工作区里什么都没发生"。这两行必须先落地，
+  // 之后的每一步也都有对应日志；全部同时写进系统临时目录的 dsh-veneer-host.log。
+  log.info('apply 进入：platform=' + platform + '，config=' + JSON.stringify(config || {}));
+
   const plan = planWorkspaces(config);
   if (!plan.ok) {
     log.warn('工作区配置无效，本次不挂载任何实例：' + plan.errors.join('；'));
     return () => {};
   }
+  log.info('规划完成：要挂 ' + plan.children.length + ' 个实例（'
+    + plan.children.map((c) => c.path || '默认实例').join(' / ') + '）');
+
 
   const packageDir = packageDirOfCtx(ctx);
   for (const child of plan.children) {

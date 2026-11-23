@@ -6,13 +6,26 @@
 //     （2026-10-18 体检单，journal/038）。本文件不使用 `ctx.get`；
 //   · **失败返回 `{ok:false, reason, blockedBy}`**，不吞错；
 //   · 宿主名词（`workspaceRegistry` …）只出现在本文件，边界检查（tools/check.mjs）会查。
+//
+// v2 新增两件事（都只在这里）：
+//   · `awaitScope(cb)`：等工作区表 + 配置编辑器就绪，用于"纳入策略"（R-13）；
+//   · `runProcess(...)`：起一次外部进程并等它结束（原生对话框 / UAC 提权都走它）。
+//     core/ 不 import `node:child_process`，进程能力只从这里出去。
+import { execFile } from 'node:child_process';
 
 const SERVICE = {
   workspace: 'workspaceRegistry',
+  configEditor: 'configEditor',
 };
 
 /** "等工作区服务就绪"的依赖清单（`ctx.inject` 入参，同样只在这里出现）。 */
 export const WORKSPACE_DEPENDENCIES = ['workspaceRegistry'];
+
+/** "等工作区表 + 配置编辑器就绪"（R-13 纳入策略 / "不再检查"改配置用）。 */
+export const SCOPE_DEPENDENCIES = ['workspaceRegistry', 'configEditor'];
+
+/** 只等配置编辑器（"不再检查本工作区"才改配置，正常流程拿不到它就只报告）。 */
+export const CONFIG_DEPENDENCIES = ['configEditor'];
 
 /** 取一个服务：只做属性访问（真 ctx 是代理，没声明就访问会抛 → 翻译成"没有"）。 */
 function service(ctx, name) {
@@ -36,6 +49,63 @@ function toDisposer(value) {
   if (typeof value === 'function') return value;
   if (value && typeof value.dispose === 'function') return () => value.dispose();
   return () => {};
+}
+
+/**
+ * 起一次外部进程并等它结束——**core/ 唯一可用的进程通道**（本层 import `node:child_process`）。
+ *
+ * 为 native 对话框与 UAC 提权服务：两者都只需要"起进程 → 拿退出码/输出 → 判定"，
+ * 不需要流式 IO。失败不抛：返回带 `ok/code/timedOut/error` 的普通对象。
+ *
+ * @param {string} command 可执行文件（如 `powershell.exe`）
+ * @param {string[]} args 参数数组（**不经过 shell**，无需引号转义；空字符串也原样传）
+ * @param {{env?:object, timeout?:number, maxBuffer?:number}} [options]
+ * @param {Function} [execFileImpl] 测试注入点（签名同 `node:child_process.execFile`）
+ * @returns {Promise<{ok:boolean, code:number|string|null, stdout:string, stderr:string, timedOut:boolean, error:string}>}
+ */
+export function runProcess(command, args, options = {}, execFileImpl) {
+  const run = typeof execFileImpl === 'function' ? execFileImpl : execFile;
+  const timeout = Number.isFinite(options.timeout) && options.timeout > 0 ? options.timeout : 0;
+  const maxBuffer = Number.isFinite(options.maxBuffer) ? options.maxBuffer : 4 * 1024 * 1024;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    let child;
+    try {
+      child = run(command, args, {
+        env: options.env && typeof options.env === 'object' ? options.env : process.env,
+        timeout,
+        windowsHide: true,
+        maxBuffer,
+      }, (err, stdout, stderr) => {
+        const timedOut = !!(err && (err.killed === true || err.code === 'ETIMEDOUT'));
+        finish({
+          ok: !err,
+          code: err ? (typeof err.code === 'number' ? err.code : (err.code || null)) : 0,
+          stdout: String(stdout || ''),
+          stderr: String(stderr || ''),
+          timedOut,
+          error: err ? String(err.message || err) : '',
+        });
+      });
+    } catch (err) {
+      finish({
+        ok: false,
+        code: null,
+        stdout: '',
+        stderr: '',
+        timedOut: false,
+        error: String((err && err.message) || err),
+      });
+      return;
+    }
+    // 不需要 stdin：关掉它，免得子进程等输入。
+    try { child.stdin.end(); } catch { /* 没有 stdin 也无所谓 */ }
+  });
 }
 
 /**
@@ -93,9 +163,30 @@ export function createDsh(ctx, packageDir = '') {
     },
 
     /**
-     * 订阅持久会话事件（`session/event`）：只把 `turn/end` 递出去。
+     * 等工作区表 + 配置编辑器就绪（R-13 纳入策略用）。
+     * 回调拿到 `{ dsh, ctx }`：`dsh` 是适配对象（读平台工作区表），`ctx` 给 `adapter/config.js` 用。
+     * @returns {object|null} 框架给的 fiber（可 dispose）
+     */
+    awaitScope(callback) {
+      return ctx.inject(SCOPE_DEPENDENCIES, (sub) => callback({ dsh: createDsh(sub, packageDir), ctx: sub }));
+    },
+
+    /**
+     * 只等配置编辑器就绪（弹窗选"不再检查本工作区"时才需要改配置）。
+     * 回调拿到**子 ctx 原样**（`adapter/config.js` 从它上面读 `configEditor`）。
+     * @returns {object|null} 框架给的 fiber（可 dispose）
+     */
+    awaitConfigEditor(callback) {
+      return ctx.inject(CONFIG_DEPENDENCIES, (sub) => callback(sub));
+    },
+
+    /**
+     * 订阅持久会话事件（`session/event`）：**所有事件原样递出**，由核心层自己判类型。
+     *
+     * 回调签名是 `(event, session)`（事件在前；`session` 原样透传、不改形状）——
+     * `turn/end` 与 `user/message` 都在这条通道上，核心层按 `event.type` 过滤。
      * 宿主没有 `ctx.on` → 返回 no-op；订阅者异常**不抛回宿主总线**。
-     * @param {(event:object) => void} callback
+     * @param {(event:object, session:object) => void} callback
      */
     onSessionEvent(callback) {
       const noop = () => {};
@@ -103,7 +194,7 @@ export function createDsh(ctx, packageDir = '') {
         if (!ctx || typeof ctx.on !== 'function' || typeof callback !== 'function') return noop;
         const disposer = ctx.on('session/event', (session, event) => {
           try {
-            callback(event);
+            callback(event, session);
           } catch { /* 订阅者异常不能抛回宿主事件总线 */ }
         });
         return toDisposer(disposer);

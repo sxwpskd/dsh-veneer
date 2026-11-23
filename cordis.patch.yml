@@ -28,3 +28,19 @@
         bridge: true
         # 桥轮询间隔（毫秒）；有文件监视时只是兜底。
         bridgePollMs: 1000
+
+        # ---- v2 · 工作区范围（R-13） ----
+        # 新出现的工作区自动纳入（`include` 为空时由它决定"全要"还是"不要"）。
+        autoIncludeNew: true
+        # 白名单：非空时只管理这些工作区。
+        include: []
+        # 黑名单：优先于 autoIncludeNew；原生弹窗选"不再检查"会追加到这里。
+        exclude: []
+
+        # ---- v2 · 会话检查（R-12） ----
+        # 会话首条人类用户消息触发一次异步扫描。
+        sessionCheck: true
+        # 扫出缺项后弹宿主原生确认框（关掉就只写日志）。
+        autoPrompt: true
+        # 修复令牌（volatile）：客户端面板写 JSON，宿主收到即执行；正常不由补丁层给值。
+        fixRequest: ''

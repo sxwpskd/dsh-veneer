@@ -30,6 +30,13 @@ Modes:
   restore             -Root <dir> -Restore -RestoreDir <backupDir>
                       restores the DACLs saved by an apply run
 
+Mode 3 (v2 task mode) -Root <dir> -TaskFile <task.json> [-ResultFile <result.json>] [-Apply]:
+                    fix ONLY the objects/items listed in the task file (paths must be
+                    under -Root; everything else is refused). Still dry-run by default:
+                    add -Apply to write. Also writes an ASCII-only -ResultFile JSON:
+                    {version,id,ok,total,success,failed,failures:[{path,items,reason}],
+                     cancelled,reason}
+
 Exit codes:
   0 ok
   2 bad arguments
@@ -45,13 +52,15 @@ BOM is decoded as ANSI, and non-ASCII bytes break parsing.
 Call style (verified 2026-11-20 - follow it exactly):
 
   powershell -NoProfile -ExecutionPolicy Bypass -File "<this>" -Root "<workspace>" [-Cap] [-DenyDC] [-Label] [-Apply]
+  To fix a task file:    ... -Root "<workspace>" -TaskFile "<task>" [-ResultFile "<result>"] [-Apply]
   To restore:            ... -Root "<workspace>" -Restore -RestoreDir "<backup dir>"
 
   . Always pass -Root BY NAME and quoted. A bare `& "<this>"` inside a caller
     script took the next statement's first token as the root ("root not found: exit").
   . The same values may also come from the environment - DSH_VENEER_ROOT,
     DSH_VENEER_FLAGS ("Apply Restore Cap DenyDC Label"), DSH_VENEER_RESTORE,
-    DSH_VENEER_LISTLIMIT, DSH_VENEER_LOG (append every line to that file).
+    DSH_VENEER_LISTLIMIT, DSH_VENEER_TASKFILE, DSH_VENEER_RESULTFILE,
+    DSH_VENEER_LOG (append every line to that file).
 #>
 [CmdletBinding()]
 param(
@@ -62,7 +71,9 @@ param(
     [switch]$Cap,
     [switch]$DenyDC,
     [switch]$Label,
-    [string]$ListLimit = ''
+    [string]$ListLimit = '',
+    [string]$TaskFile = '',
+    [string]$ResultFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -84,6 +95,12 @@ if ($env:DSH_VENEER_FLAGS) {
     }
 }
 if ($env:DSH_VENEER_RESTORE -and -not $RestoreDir) { $RestoreDir = ([string]$env:DSH_VENEER_RESTORE).Trim() }
+# Task mode (v2): the elevated process is started with these paths; values also
+# travel through the environment so a caller script cannot mangle the quotes.
+if ($env:DSH_VENEER_TASKFILE -and -not $TaskFile) { $TaskFile = ([string]$env:DSH_VENEER_TASKFILE).Trim() }
+if ($env:DSH_VENEER_RESULTFILE -and -not $ResultFile) { $ResultFile = ([string]$env:DSH_VENEER_RESULTFILE).Trim() }
+$TaskFile = ([string]$TaskFile).Trim().Trim('"')
+$ResultFile = ([string]$ResultFile).Trim().Trim('"')
 $limitValue = 50000
 if ($ListLimit -ne '' -and ([string]$ListLimit).Trim() -match '^\d+$') { $limitValue = [int]$ListLimit }
 if ($env:DSH_VENEER_LISTLIMIT -and ([string]$env:DSH_VENEER_LISTLIMIT).Trim() -match '^\d+$') {
@@ -117,7 +134,8 @@ function Write-Line {
 function Write-Err {
     param([string]$Text)
     $line = 'error: ' + $Text
-    # 单流：错误也进同一个 sink（否则一个语句的 stdout 一个 stderr，日志会先落一个再落一个）。
+    # Single stream: errors go to the same sink too (stdout and stderr from one
+    # statement otherwise land in the caller's log in two separate pieces).
     [Console]::Out.WriteLine($line)
     if ($env:DSH_VENEER_LOG) { Add-Content -LiteralPath $env:DSH_VENEER_LOG -Value $line -Encoding UTF8 }
 }
@@ -316,6 +334,283 @@ function Invoke-RestoreOnce {
 }
 
 # ---------------------------------------------------------------------------
+# v2 task mode helpers
+# ---------------------------------------------------------------------------
+# ASCII-only JSON (same trick as the inspect script): every non-ASCII / control
+# char becomes \uXXXX, so the file survives any code page and Node turns it
+# back into the real characters.
+function ConvertTo-AsciiJsonText {
+    param($Value)
+    $json = [string](ConvertTo-Json -InputObject $Value -Depth 8 -Compress)
+    $builder = New-Object System.Text.StringBuilder
+    foreach ($ch in $json.ToCharArray()) {
+        $code = [int]$ch
+        if ($code -lt 32 -or $code -gt 126) {
+            [void]$builder.Append(('\u{0:x4}' -f $code))
+        } else {
+            [void]$builder.Append($ch)
+        }
+    }
+    return $builder.ToString()
+}
+
+# Result contract (2026-11-23, the panel parses it; the request id must come back):
+#   { version, id, ok, total, success, failed, failures:[{path,items,reason}], cancelled, reason }
+function Write-ResultFile {
+    param(
+        [string]$Path,
+        [string]$Id,
+        [bool]$Ok,
+        [int]$Total,
+        [int]$Success,
+        [int]$Failed,
+        $Failures,
+        [bool]$Cancelled,
+        [string]$Reason
+    )
+    if ($Path -eq '') { return }
+    $failureList = New-Object System.Collections.ArrayList
+    foreach ($entry in @($Failures)) {
+        if ($null -eq $entry) { continue }
+        [void]$failureList.Add(@{
+            path = [string]$entry.path
+            items = @($entry.items)
+            reason = [string]$entry.reason
+        })
+    }
+    $doc = @{
+        version = 1
+        id = $Id
+        ok = $Ok
+        total = $Total
+        success = $Success
+        failed = $Failed
+        failures = $failureList.ToArray()
+        cancelled = $Cancelled
+        reason = $Reason
+    }
+    $text = ConvertTo-AsciiJsonText -Value $doc
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllText($Path, $text, [System.Text.Encoding]::ASCII)
+}
+
+function Read-JsonFile {
+    param([string]$Path)
+    $text = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+    return ($text | ConvertFrom-Json)
+}
+
+# Resolve a task object path and refuse anything outside -Root (the task file is
+# written by the plugin, but the elevated side does not trust client data).
+function Resolve-UnderRoot {
+    param([string]$Path, [string]$Root)
+    $full = $null
+    try { $full = (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).FullName } catch { return $null }
+    $base = ([string]$Root).TrimEnd('\')
+    if ($full.Length -le $base.Length) { return $null }
+    $prefix = $base + '\'
+    if ($full.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { return $full }
+    return $null
+}
+
+# Back up ONLY the objects this task touches (the full-tree backup is for legacy
+# -Root mode and would be needlessly expensive for a handful of files).
+function Save-TaskBackups {
+    param([string]$Root, $Items)
+    $dir = Join-Path (Join-Path $Root '.dsh-veneer-backup') (Get-Date -Format 'yyyyMMdd-HHmmss')
+    try { New-Item -ItemType Directory -Path $dir -Force | Out-Null } catch { return $null }
+    $entries = New-Object System.Collections.ArrayList
+    $index = 0
+    foreach ($item in @($Items)) {
+        if ($null -eq $item) { continue }
+        $index = $index + 1
+        $file = Join-Path $dir ('acl-' + $index + '.txt')
+        & icacls.exe $item.FullName /save $file /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        [void]$entries.Add(@{ path = $item.FullName; file = $file })
+    }
+    $manifest = @{ version = 1; root = $Root; created = (Get-Date -Format 'o'); entries = $entries.ToArray() }
+    try {
+        ConvertTo-Json -InputObject $manifest -Depth 6 | Set-Content -LiteralPath (Join-Path $dir 'manifest.json') -Encoding UTF8
+    } catch { return $null }
+    return @{ dir = $dir }
+}
+
+# Task mode: fix only the listed objects/items. Dry run by default (-Apply writes).
+function Invoke-TaskMode {
+    param(
+        [string]$Root,
+        [string]$TaskPath,
+        [string]$OutPath,
+        [bool]$Apply,
+        [string]$CapSid,
+        [string]$RootLabel
+    )
+    $failures = New-Object System.Collections.ArrayList
+    if (-not (Test-Path -LiteralPath $TaskPath)) {
+        Write-Err 'task file not found (the path is not printed on purpose)'
+        Write-ResultFile -Path $OutPath -Id '' -Ok $false -Total 0 -Success 0 -Failed 1 `
+            -Failures @(@{ path = ''; items = @(); reason = 'task-file-missing' }) -Cancelled $false -Reason 'task file not found'
+        return 2
+    }
+    $task = $null
+    try { $task = Read-JsonFile -Path $TaskPath }
+    catch {
+        Write-Err 'task file is not valid JSON'
+        Write-ResultFile -Path $OutPath -Id '' -Ok $false -Total 0 -Success 0 -Failed 1 `
+            -Failures @(@{ path = ''; items = @(); reason = 'task-file-invalid-json' }) -Cancelled $false -Reason 'task file is not valid JSON'
+        return 2
+    }
+    if ($null -eq $task) {
+        Write-Err 'task file is empty'
+        Write-ResultFile -Path $OutPath -Id '' -Ok $false -Total 0 -Success 0 -Failed 0 -Failures @() -Cancelled $false -Reason 'task file is empty'
+        return 2
+    }
+    $taskId = [string]$task.id
+    $taskWorkspace = [string]$task.workspace
+    if ($taskWorkspace -ne '') {
+        $given = $taskWorkspace.TrimEnd('\')
+        if (-not $given.Equals(([string]$Root).TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+            Write-Err 'task workspace does not match -Root (refused)'
+            Write-ResultFile -Path $OutPath -Id $taskId -Ok $false -Total 0 -Success 0 -Failed 1 `
+                -Failures @(@{ path = ''; items = @(); reason = 'workspace-mismatch' }) -Cancelled $false -Reason 'task workspace does not match -Root'
+            return 2
+        }
+    }
+
+    $taskObjects = @($task.objects)
+    $rejected = 0
+    $plan = New-Object System.Collections.ArrayList
+    foreach ($obj in $taskObjects) {
+        if ($null -eq $obj) { $rejected = $rejected + 1; [void]$failures.Add(@{ path = ''; items = @(); reason = 'object is not an object' }); continue }
+        $rawPath = [string]$obj.path
+        $full = Resolve-UnderRoot -Path $rawPath -Root $Root
+        if ($null -eq $full) {
+            $rejected = $rejected + 1
+            [void]$failures.Add(@{ path = $rawPath; items = @(); reason = 'refused: outside the workspace root' })
+            Write-Line 'FAIL  refused: path outside the workspace root'
+            continue
+        }
+        $rawItems = @($obj.items)
+        $wanted = @()
+        foreach ($name in @('cap', 'denyDC', 'label')) {
+            if ($rawItems -contains $name) { $wanted += $name }
+        }
+        if ($wanted.Count -eq 0) {
+            $rejected = $rejected + 1
+            [void]$failures.Add(@{ path = $full; items = @(); reason = 'no supported items' })
+            Write-Line ('FAIL  no supported items  ' + (Get-Relative -Path $full -Root $Root))
+            continue
+        }
+        if (($wanted -contains 'cap') -and $null -eq $CapSid) {
+            $rejected = $rejected + 1
+            [void]$failures.Add(@{ path = $full; items = @('cap'); reason = 'root has no capability ACE' })
+            Write-Line ('FAIL  root has no capability ACE  ' + (Get-Relative -Path $full -Root $Root))
+            continue
+        }
+        $item = $null
+        try { $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop }
+        catch {
+            $rejected = $rejected + 1
+            [void]$failures.Add(@{ path = $full; items = $wanted; reason = 'object not readable' })
+            continue
+        }
+        if ((($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) -ne 0) {
+            $rejected = $rejected + 1
+            [void]$failures.Add(@{ path = $full; items = $wanted; reason = 'refused: reparse point' })
+            Write-Line ('SKIP  reparse-point  ' + (Get-Relative -Path $full -Root $Root))
+            continue
+        }
+        $sig = Get-Signature -Item $item -CapSid $CapSid -WantCap $true
+        if ($null -ne $sig.error) {
+            $rejected = $rejected + 1
+            [void]$failures.Add(@{ path = $full; items = $wanted; reason = [string]$sig.error })
+            Write-Line ('FAIL  ' + [string]$sig.error + '  ' + (Get-Relative -Path $full -Root $Root))
+            continue
+        }
+        $missing = Get-Missing -Sig $sig -RootLabel $RootLabel -WantCap ($wanted -contains 'cap') -CapSid $CapSid -WantDeny ($wanted -contains 'denyDC') -WantLabel ($wanted -contains 'label')
+        if ($missing.Count -eq 0) {
+            Write-Line ('SKIP  already complete  ' + (Get-Relative -Path $full -Root $Root))
+            continue
+        }
+        [void]$plan.Add(@{ item = $item; full = $full; missing = $missing })
+        $kind = 'FILE'
+        if ($item.PSIsContainer) { $kind = 'DIR ' }
+        Write-Line ('  ' + $kind + ' ' + (Get-Relative -Path $full -Root $Root) + '  needs: ' + ($missing -join ', '))
+    }
+
+    $total = $plan.Count + $rejected
+    if (-not $Apply) {
+        Write-Line ''
+        Write-Line ('dry run finished; nothing was changed (task lists ' + $plan.Count + ' object(s) that would change, ' + $rejected + ' refused).')
+        $dryOk = ($plan.Count -eq 0) -and ($failures.Count -eq 0)
+        Write-ResultFile -Path $OutPath -Id $taskId -Ok $dryOk -Total $total -Success 0 -Failed $failures.Count `
+            -Failures $failures.ToArray() -Cancelled $false -Reason 'dry run; nothing was changed'
+        if ($failures.Count -gt 0) { return 8 }
+        return 0
+    }
+    if ($plan.Count -eq 0) {
+        Write-Line 'nothing to fix'
+        $doneOk = ($failures.Count -eq 0)
+        Write-ResultFile -Path $OutPath -Id $taskId -Ok $doneOk -Total $total -Success 0 -Failed $failures.Count `
+            -Failures $failures.ToArray() -Cancelled $false -Reason ''
+        if ($failures.Count -gt 0) { return 8 }
+        return 0
+    }
+
+    $backupItems = New-Object System.Collections.ArrayList
+    foreach ($p in $plan) { [void]$backupItems.Add($p.item) }
+    $backup = Save-TaskBackups -Root $Root -Items $backupItems
+    if ($null -eq $backup) {
+        Write-Err 'backup failed; nothing was changed'
+        Write-ResultFile -Path $OutPath -Id $taskId -Ok $false -Total $total -Success 0 -Failed ($failures.Count + $plan.Count) `
+            -Failures $failures.ToArray() -Cancelled $false -Reason 'backup failed; nothing was changed'
+        return 7
+    }
+    Write-Line ('backup      ' + (Get-Relative -Path $backup.dir -Root $Root))
+
+    $success = 0
+    $fixedItems = New-Object System.Collections.ArrayList
+    foreach ($p in $plan) {
+        $sig = $p.item
+        try {
+            if ($p.missing -contains 'cap') { Add-CapAce -Path $p.full -CapSid $CapSid -IsDir ([bool]$sig.PSIsContainer) }
+            if ($p.missing -contains 'denyDC') { Add-DenyDc -Path $p.full }
+            if ($p.missing -contains 'label') {
+                if (-not (Set-LabelRobust -Path $p.full -IsDir ([bool]$sig.PSIsContainer) -Level 'Low')) { throw 'label change denied' }
+            }
+            $success = $success + 1
+            [void]$fixedItems.Add($p)
+            Write-Line ('FIXED ' + (Get-Relative -Path $p.full -Root $Root) + '  (' + ($p.missing -join ', ') + ')')
+        }
+        catch {
+            [void]$failures.Add(@{ path = $p.full; items = $p.missing; reason = $_.Exception.Message })
+            Write-Line ('FAIL  ' + (Get-Relative -Path $p.full -Root $Root) + ': ' + $_.Exception.Message)
+        }
+    }
+
+    # Re-check what this run claims to have fixed (a fix that did not stick is a failure).
+    foreach ($p in $fixedItems) {
+        $sig = Get-Signature -Item $p.item -CapSid $CapSid -WantCap $true
+        $again = Get-Missing -Sig $sig -RootLabel $RootLabel -WantCap ($p.missing -contains 'cap') -CapSid $CapSid -WantDeny ($p.missing -contains 'denyDC') -WantLabel ($p.missing -contains 'label')
+        if ($again.Count -gt 0) {
+            $success = $success - 1
+            [void]$failures.Add(@{ path = $p.full; items = $again; reason = 'still missing: ' + ($again -join ', ') })
+        }
+    }
+
+    $ok = ($success -eq $total) -and ($failures.Count -eq 0)
+    Write-Line ''
+    Write-Line ('task done: ' + $success + ' / ' + $total + ' fixed, ' + $failures.Count + ' failed')
+    Write-ResultFile -Path $OutPath -Id $taskId -Ok $ok -Total $total -Success $success -Failed $failures.Count `
+        -Failures $failures.ToArray() -Cancelled $false -Reason ''
+    if ($failures.Count -gt 0) { return 8 }
+    return 0
+}
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction SilentlyContinue
@@ -334,7 +629,7 @@ $wantLabel = [bool]$Label -or (-not $wantAny)
 
 $capSid = Get-CapSid -Path $root
 $rootLabel = Get-LabelLevel -Path $root
-if ($wantCap -and $capSid -eq $null) {
+if ($TaskFile -eq '' -and $wantCap -and $capSid -eq $null) {
     Write-Err 'refused: the root has no workspace capability ACE (the host never materialized it)'
     exit 6
 }
@@ -347,6 +642,12 @@ $labelText = '(none)'
 if ($rootLabel -ne $null) { $labelText = $rootLabel }
 Write-Line ('root label  ' + $labelText)
 if ($Apply) { Write-Line 'mode        APPLY' } else { Write-Line 'mode        plan (dry run)' }
+
+# v2 task mode: only the listed objects/items (default is still a dry run).
+if ($TaskFile -ne '') {
+    Write-Line 'task mode   (only the objects/items listed in the task file)'
+    exit (Invoke-TaskMode -Root $root -TaskPath $TaskFile -OutPath $ResultFile -Apply ([bool]$Apply) -CapSid $capSid -RootLabel $rootLabel)
+}
 
 $scan = Get-Targets -Root $root -CapSid $capSid -WantCap $wantCap -Limit $ListLimit
 if ($scan.truncated) { Write-Line ('note        listing stopped at ' + $ListLimit + ' objects') }

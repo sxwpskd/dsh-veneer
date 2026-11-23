@@ -1,21 +1,52 @@
 # 更新日志
 
+## 0.4.0 — 2026-11-23
+
+第二期：**看得见、点得动、修得掉**（主人 2026-11-23 定的 A+B 两条通道都要）。
+
+- **会话里自动检查（A 通道）**：会话的**第一条人类用户消息**出现时，宿主侧把事件异步转给所属工作区实例 → 异步扫描；
+  扫出缺项且 `autoPrompt` 开 → 弹**宿主原生确认框**：「沙箱物化修复」/「以后再说」/「不再检查本工作区」。
+  选修复 → UAC 提权执行预置命令；选不再检查 → 写回配置 `exclude`（不再管理该工作区）。
+- **配置页勾选修复（B 通道）**：面板按「工作区 → 文件 → 缺哪几项」列出清单，默认全选、可逐项勾选，
+  点「沙箱物化修复」把令牌写进 volatile 字段 `fixRequest`；宿主收到即校验并执行（同一 id 只跑一次、
+  按工作区过滤、串行），结果写 `.dsh-veneer/fix-result.json` 并**自动重扫**刷新。
+- **工作区管理（R-13）**：管理范围 = 平台工作区表 ∩ 策略；`autoIncludeNew`（默认开）、`include`、`exclude`。
+  每个工作区一个实例；新工作区自动纳入。
+- **修复执行**：`scripts/dsh-veneer-apply.ps1` 新增 `-TaskFile`/`-ResultFile`：只修任务列出的对象与项，
+  默认仍干跑；提权侧不信任任务文件（路径必须在 root 内、reparse 拒绝、只补报告确认缺的项），
+  只备份被修对象；结果 JSON 为**纯 ASCII**、回带请求 `id`。UAC 取消/超时**不重试**，宿主写兜底结果。
+- **配置声明**：新增 Schemastery `Config`（维一运行时依赖 `@deepseek-ai/schemastery`），
+  默认值仍只在 `config/defaults.js` 写一份；`fixRequest` 标记 volatile。
+- 新增原生对话框脚本 `scripts/dsh-veneer-ask.ps1`（纯 ASCII、WinForms）。
+- 测试：新增 v2 套件 40 项；既有 128 / 107 项不变；边界检查、官方 check 通过。
+
+## 0.3.1 — 2026-11-22
+
+修 0.3.0 的两个真机问题（都是"能扫、但结果/提示不对"）：
+
+- **中文路径在报告里变成 U+FFFD**：`scripts/dsh-veneer-inspect.ps1` 最后用 `ConvertTo-Json` 交给
+  PowerShell 5.1 的 stdout（OEM 代码页），Node 按 UTF-8 收 → 非 ASCII 文件名损坏。改为**把 JSON 的
+  UTF-8 字节直接写进标准输出**（`[Console]::OpenStandardOutput()`），脚本保持纯 ASCII。
+- **面板把"文件不存在"误报成"返回形状没有 text"**：新增 `extractText()`，`{ok:false,error}` 的
+  message/code 原样显示；并支持最多 3 层 `value` 解包。现在读不到会直接说原因（例如 ENOENT）。
+- `LOG-SCHEMA.md` 留在仓库根（与 dsh-milieu 一致：流程/规格文档不进包），不在 `files` 白名单里。
+- 测试：veneer 套件加 `extractText` 回归，全套 **19 套 / 约 1836 项全绿**。
+
 ## 0.3.0 — 2026-11-22
 
-按脚手架补齐**日志层**（plugin/_scaffold/log/README.md），并修客户端读文件的错误契约：
+按脚手架补齐**日志层**（`plugin/_scaffold/log/README.md`），并修客户端读文件的错误契约：
 
-- **日志层**（新增 LOG-SCHEMA.md）：\log/schema.js\ 事件表/级别/截断；\log/file-sink.js\ 写
-  \<工作区>/.dsh-veneer/veneer.log\（JSONL、1 MiB 轮转、保留 2 份、失败禁用并报告一次）；
-  \log/memory-sink.js\ 200 条环形缓冲；\log/logger.js\ 门面（宿主 logger + 内存 + 文件 sink，永不抛）；
-  \log/shared.js\ 装配（一个进程一个日志口；根没解析出来时先落系统临时目录的**引导日志**，根出来再换成工作区文件）。
-- **客户端只读展示的调试行**：面板显示最近 6 条客户端日志（内存缓冲），读失败原因也进日志。
-- **修读取契约**：\workspaceFiles.read\ 是 \ead(sessionId, path, range, signal)\（错误信息原文：
-  "expected 3 business argument(s) plus an optional AbortSignal"）。改用 \useSessions\ 快照取 SessionId 后按 3 参读；
-  先读小摘要 \eview/veneer-summary.json\，再退整份报告；每次尝试的原因都显示在面板上。
+- **日志层**（新增 `LOG-SCHEMA.md`）：`log/schema.js` 事件表/级别/截断；`log/file-sink.js` 写
+  `<工作区>/.dsh-veneer/veneer.log`（JSONL、1 MiB 轮转、保留 2 份、失败禁用并报告一次）；
+  `log/memory-sink.js` 200 条环形缓冲；`log/logger.js` 门面（宿主 logger + 内存 + 文件 sink，永不抛）；
+  `log/shared.js` 装配（一个进程一个日志口；根没解析出来时先落系统临时目录的**引导日志**，根出来再换成工作区文件）。
+- **客户端只读展示的调试行**：面板显示最近 6 条客户端日志（内存缓冲）；读失败原因也进日志。
+- **修读取契约**：`workspaceFiles.read` 是 `read(sessionId, path, range, signal)`（错误信息原文：
+  "expected 3 business argument(s) plus an optional AbortSignal"）。改用 `useSessions` 快照取 SessionId 后按 3 参读；
+  先读小摘要 `review/veneer-summary.json`，再退整份报告；每次尝试的原因都显示在面板上。
 - **宿主挂载改成"先同步解析根"**：实例 fiber 已声明工作区服务依赖，通常挂载即就绪；解析失败也**进日志**（不再静默），
-  然后才走 \ctx.inject\ 等待 + 兜底定时器。
+  然后才走 `ctx.inject` 等待 + 兜底定时器。
 - 测试：新增日志层套件（107 项）+ 实例日志落盘回归（veneer 123 项），全套 **19 套 / 约 1828 项全绿**。
-
 ## 0.2.4 — 2026-11-22
 
 把"**宿主那一半到底跑到哪一步**"变成可查的事实（上一版只能靠猜）：

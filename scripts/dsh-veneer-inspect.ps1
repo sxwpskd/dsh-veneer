@@ -35,6 +35,11 @@ Windows PowerShell 5.1. Source is pure ASCII on purpose.
 # nested function parameter named $Input...; 2026-11-20 hit).
 & {
     $ErrorActionPreference = 'Stop'
+    # 2026-11-22 field bug: object paths containing non-ASCII characters arrived as
+    # U+FFFD. ACL reading was fine; PowerShell 5.1 wrote stdout with the OEM code
+    # page while Node decoded it as UTF-8. The fix is at the end of this file:
+    # write UTF-8 bytes straight to the standard output stream.
+    try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
 function Get-SidValue {
     param($Ace)
@@ -136,7 +141,22 @@ function Emit-Json {
         errors = @($Errors)
         truncated = $Truncated
     }
-    ConvertTo-Json -InputObject $payload -Depth 6 -Compress
+    # ASCII-only JSON: escape every non-ASCII / control char as \uXXXX.
+    # Why not UTF-8 bytes on the raw stream: that bypasses the PowerShell pipeline
+    # and redirection (`& script | Out-File`, `> file`) that callers use to capture
+    # us - the live test then saw empty output (2026-11-22). Pure ASCII survives any
+    # code page, and Node's JSON.parse turns \uXXXX back into the real characters.
+    $__json = [string](ConvertTo-Json -InputObject $payload -Depth 6 -Compress)
+    $__sb = New-Object System.Text.StringBuilder
+    foreach ($__ch in $__json.ToCharArray()) {
+        $__code = [int]$__ch
+        if ($__code -lt 32 -or $__code -gt 126) {
+            [void]$__sb.Append(('\u{0:x4}' -f $__code))
+        } else {
+            [void]$__sb.Append($__ch)
+        }
+    }
+    $__sb.ToString()
 }
 
 function Invoke-Main {

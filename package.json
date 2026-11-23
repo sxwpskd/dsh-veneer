@@ -1,6 +1,6 @@
 {
   "name": "dsh-veneer",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "license": "MIT",
   "description": "工作区物化保底：检测工作区既有对象是否缺了沙箱物化三项（能力 ACE / Everyone 拒删子项 / Low 标签），出报告，并生成一条需要用户在宿主外提权执行的修复命令。只检测，不在沙箱内改 ACL。",
@@ -40,6 +40,9 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "packageManager": "pnpm@11.7.0",
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.5"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh": ">=0.2.0-0 <0.3.0"
   },
@@ -65,6 +68,6 @@
     "client": "有界面半边：插件页 dsh-veneer 那一行的配置页里有「检查沙箱物化」按钮。界面只发**文件桥请求**（`.dsh-veneer/request.json`），不做 RPC——插件包没有 Typert 生成，界面调不到宿主方法。",
     "windows": "Windows-only；非 Windows 平台挂载即报告 unsupported 并卸载，不做任何事。",
     "files": "白名单 = 包里到底有什么。`scripts/` 是执行侧脚本，必须进包——生成给用户的命令指向它。",
-    "no-deps": "零运行时依赖（不用 schemastery）：配置走补丁层 + 代码默认值，避免再引一个要打包的依赖。"
+    "no-deps": "v2 起有一个运行时依赖 `@deepseek-ai/schemastery`（声明 Config / volatile，Cordis 配置页需要）。本机 dev 用 `node tools/veneer-dev-deps.mjs` 从已安装 profile 复制到 `plugin/node_modules/`（gitignore，不提交）；正式安装时由 pnpm 从依赖安装。"
   }
 }

@@ -32,6 +32,8 @@ import { guardSync } from './exception/guard.js';
 import { CODES } from './exception/codes.js';
 import { withDefaults, resolveVolatile } from './config/defaults.js';
 import { parseFixRequest, publishFixRequest, fixRequestChanged } from './core/fix-bus.js';
+import { snapshotWorkspaces, subscribeWorkspaces } from './core/aggregate.js';
+import { joinPath } from './core/persist.js';
 
 export const name = 'dsh-veneer';
 export const inject = [];
@@ -132,11 +134,50 @@ export function apply(ctx, config) {
   const packageDir = packageDirOfCtx(ctx);
   /** 工作区表注入回调只挂一次：服务可用性变化时 Cordis 可能重跑回调，重复挂会出双实例。 */
   let scopeMounted = false;
+  /** 已经挂过实例的工作区根（多工作区汇总写到每个根的 `.dsh-veneer/workspaces.json`）。 */
+  const mountedRoots = [];
+  let aggTimer = null;
+  let aggDispose = null;
+
+  /**
+   * 把"所有工作区的最新扫描摘要"写到每个被管工作区里（面板读当前工作区那份就能展示全部）。
+   * 2026-11-23 主人指出"配置显示管全部、实际只看到 DSH"：浏览器只能读当前工作区，所以由宿主分发。
+   */
+  const writeAggregate = () => {
+    const payload = JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      workspaces: snapshotWorkspaces(),
+    }, null, 2);
+    const fs = createFs();
+    for (const root of mountedRoots) {
+      if (!root) continue;
+      try {
+        const dir = joinPath(root, '.dsh-veneer');
+        fs.mkdirp(dir);
+        fs.writeTextAtomic(joinPath(dir, 'workspaces.json'), payload);
+      } catch { /* 写不进去不影响扫描本身 */ }
+    }
+  };
+  const scheduleAggregate = () => {
+    if (aggTimer !== null) return;
+    try {
+      aggTimer = setTimeout(() => {
+        aggTimer = null;
+        writeAggregate();
+      }, 200);
+      if (aggTimer && typeof aggTimer.unref === 'function') aggTimer.unref();
+    } catch {
+      aggTimer = null;
+      writeAggregate();
+    }
+  };
 
   /** 挂一批工作区（每个一个 child fiber）；返回挂上的个数。 */
   const mountAll = (entries) => {
     let mounted = 0;
     for (const entry of entries) {
+      if (entry && entry.path) mountedRoots.push(entry.path);
       const mountedResult = guardSync('挂载工作区实例', () => mountChild(ctx, entry.config, packageDir), {
         log,
         blockedBy: 'host',
@@ -222,6 +263,13 @@ export function apply(ctx, config) {
   }
 
   // ------------------------------------------------------------------
+  // 多工作区汇总（R-13 展示面）：订阅实例上报的扫描摘要 → 防抖写盘。
+  // 挂载一开始就写一份（可能为空），面板能尽早读到文件而不是"读不到"。
+  // ------------------------------------------------------------------
+  aggDispose = subscribeWorkspaces(() => scheduleAggregate());
+  scheduleAggregate();
+
+  // ------------------------------------------------------------------
   // 即时字段（Volatile）：修复令牌。事件只发给插件行 fiber，所以在**本层**监听。
   // 回调参数是**变更路径数组**（`string[][]`，如 `[['fixRequest']]`），不是新配置。
   // ------------------------------------------------------------------
@@ -257,6 +305,14 @@ export function apply(ctx, config) {
   return () => {
     if (disposed) return;
     disposed = true;
+    if (typeof aggDispose === 'function') {
+      try { aggDispose(); } catch { /* 退订失败不反噬宿主 */ }
+      aggDispose = null;
+    }
+    if (aggTimer !== null) {
+      try { clearTimeout(aggTimer); } catch { /* 同上 */ }
+      aggTimer = null;
+    }
     if (typeof volatileDispose === 'function') {
       try { volatileDispose(); } catch { /* 取消监听失败不反噬宿主 */ }
       volatileDispose = null;

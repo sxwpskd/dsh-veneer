@@ -8,24 +8,20 @@
 //   · 宿主名词（`workspaceRegistry` …）只出现在本文件，边界检查（tools/check.mjs）会查。
 //
 // v2 新增两件事（都只在这里）：
-//   · `awaitScope(cb)`：等工作区表 + 配置编辑器就绪，用于"纳入策略"（R-13）；
+//   · `awaitScope(cb)`：等工作区表就绪，用于"管哪些工作区"（R-13）；
 //   · `runProcess(...)`：起一次外部进程并等它结束（原生对话框 / UAC 提权都走它）。
 //     core/ 不 import `node:child_process`，进程能力只从这里出去。
 import { execFile } from 'node:child_process';
 
 const SERVICE = {
   workspace: 'workspaceRegistry',
-  configEditor: 'configEditor',
 };
 
 /** "等工作区服务就绪"的依赖清单（`ctx.inject` 入参，同样只在这里出现）。 */
 export const WORKSPACE_DEPENDENCIES = ['workspaceRegistry'];
 
-/** "等工作区表 + 配置编辑器就绪"（R-13 纳入策略 / "不再检查"改配置用）。 */
-export const SCOPE_DEPENDENCIES = ['workspaceRegistry', 'configEditor'];
-
-/** 只等配置编辑器（"不再检查本工作区"才改配置，正常流程拿不到它就只报告）。 */
-export const CONFIG_DEPENDENCIES = ['configEditor'];
+/** "等工作区表就绪"（范围规划用；0.4.6 起不再需要 configEditor）。 */
+export const SCOPE_DEPENDENCIES = ['workspaceRegistry'];
 
 /** 取一个服务：只做属性访问（真 ctx 是代理，没声明就访问会抛 → 翻译成"没有"）。 */
 function service(ctx, name) {
@@ -163,21 +159,12 @@ export function createDsh(ctx, packageDir = '') {
     },
 
     /**
-     * 等工作区表 + 配置编辑器就绪（R-13 纳入策略用）。
-     * 回调拿到 `{ dsh, ctx }`：`dsh` 是适配对象（读平台工作区表），`ctx` 给 `adapter/config.js` 用。
+     * 等工作区表就绪（范围规划用）。
+     * 回调拿到 `{ dsh, ctx }`：`dsh` 是适配对象（读平台工作区表），`ctx` 给需要子 ctx 的调用方。
      * @returns {object|null} 框架给的 fiber（可 dispose）
      */
     awaitScope(callback) {
       return ctx.inject(SCOPE_DEPENDENCIES, (sub) => callback({ dsh: createDsh(sub, packageDir), ctx: sub }));
-    },
-
-    /**
-     * 只等配置编辑器就绪（弹窗选"不再检查本工作区"时才需要改配置）。
-     * 回调拿到**子 ctx 原样**（`adapter/config.js` 从它上面读 `configEditor`）。
-     * @returns {object|null} 框架给的 fiber（可 dispose）
-     */
-    awaitConfigEditor(callback) {
-      return ctx.inject(CONFIG_DEPENDENCIES, (sub) => callback(sub));
     },
 
     /**

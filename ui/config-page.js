@@ -31,6 +31,57 @@ export const CLIENT_INJECT = ['slots', 'remote', 'remote.workspaceFiles'];
 /** 小摘要的相对路径（宿主写在报告旁边；见 core/persist.js 的 `summaryRelOf`）。 */
 const SUMMARY_REL = 'review/veneer-summary.json';
 
+/** 宿主写的"多工作区扫描摘要"（每个被管工作区的 `.dsh-veneer/` 都有一份，面板读当前工作区那份）。 */
+export const AGGREGATE_REL = '.dsh-veneer/workspaces.json';
+
+/**
+ * 宿主汇总（`.dsh-veneer/workspaces.json`）→ 面板行（按队列顺序，当前工作区标出来）。
+ * 纯函数（测试直接调）。
+ *
+ * @param {object|null} aggregate `{version, updatedAt, workspaces:[{root,status,counts,scannedAt,reason}]}`
+ * @param {string} [currentWorkspace]
+ * @returns {Array<{root:string, text:string, tone:string, current:boolean}>}
+ */
+export function workspaceStatusRowsOf(aggregate, currentWorkspace = '') {
+  const items = aggregate && Array.isArray(aggregate.workspaces) ? aggregate.workspaces : [];
+  const rows = [];
+  for (const item of items) {
+    if (!item || typeof item.root !== 'string' || !item.root) continue;
+    const counts = item.counts && typeof item.counts === 'object' ? item.counts : {};
+    const scanned = item.scannedAt ? timestampText(item.scannedAt) : '';
+    const current = !!currentWorkspace && sameWorkspace(item.root, currentWorkspace);
+    const status = String(item.status || 'unknown');
+    let text = '';
+    let tone = 'muted';
+    if (status === 'ok') {
+      text = '无缺项（检查 ' + (counts.checked || 0) + '）';
+      tone = 'good';
+    } else if (status === 'incomplete') {
+      text = '缺 ' + (counts.missing || 0) + '（检查 ' + (counts.checked || 0) + '）';
+      tone = 'warn';
+    } else if (status === 'partial') {
+      text = '部分失败：失败 ' + (counts.failed || 0) + (item.reason ? '；' + item.reason : '');
+      tone = 'warn';
+    } else if (status === 'root-absent') {
+      text = '根归宿主（本插件不动手）' + (item.reason ? '：' + item.reason : '');
+    } else if (status === 'failed') {
+      text = '扫描失败：' + (item.reason || '未知原因');
+      tone = 'bad';
+    } else if (status === 'unsupported') {
+      text = '不支持（非 Windows）';
+    } else {
+      text = '状态：' + status;
+    }
+    rows.push({
+      root: item.root,
+      text: text + (scanned ? ' · ' + scanned : ''),
+      tone,
+      current,
+    });
+  }
+  return rows;
+}
+
 /** 派发修复请求的配置字段（宿主 Config 里的 volatile 字段；面板只 `set`，不读）。 */
 export const FIX_REQUEST_KEY = 'fixRequest';
 
@@ -382,6 +433,11 @@ const styles = {
   wsList: { display: 'flex', flexDirection: 'column', gap: '2px', margin: '6px 0' },
   wsOption: { display: 'flex', alignItems: 'center', gap: '8px', padding: '3px 2px', fontSize: '13px', cursor: 'pointer' },
   wsPath: { overflowWrap: 'anywhere' },
+  aggRow: { display: 'flex', alignItems: 'baseline', gap: '8px', padding: '2px 0', fontSize: '12px', flexWrap: 'wrap' },
+  dialogBackdrop: { position: 'fixed', inset: '0', zIndex: 2147483000, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' },
+  dialog: { width: 'min(560px, calc(100vw - 48px))', maxHeight: 'min(640px, calc(100vh - 48px))', overflow: 'auto', background: TOKENS.bg, color: TOKENS.text, border: '1px solid ' + TOKENS.border, borderRadius: 10, padding: '14px 16px', boxShadow: '0 8px 24px rgba(0,0,0,0.25)' },
+  dialogTitle: { fontSize: '15px', fontWeight: 600, marginBottom: '6px' },
+  dialogFoot: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '8px', marginTop: '8px' },
   muted: { color: TOKENS.muted, fontSize: 12, margin: 0 },
   tertiary: { color: TOKENS.tertiary, fontSize: 12 },
   row: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', margin: '4px 0' },
@@ -457,6 +513,78 @@ function buildItemRow(e, object, selectedSet, busy, onToggle) {
   ]);
 }
 
+/**
+ * 勾选草稿 → 要写进配置的 `workspaces` 值。全勾 = 空列表（= 管平台全部），否则写勾选的路径。
+ * @param {string[]} draft 勾选的路径
+ * @param {string[]} paths 平台工作区清单
+ */
+export function workspacesValueOf(draft, paths) {
+  const list = (Array.isArray(draft) ? draft : []).filter((path) => typeof path === 'string' && path);
+  const all = Array.isArray(paths) ? paths : [];
+  const allSelected = all.length > 0 && all.every((path) => list.some((item) => sameWorkspace(item, path)));
+  return allSelected ? [] : list.map((path) => ({ path }));
+}
+
+/**
+ * 「管理工作区」弹窗（2026-11-23 主人定：**关掉弹窗时写配置**，不再要单独的保存按钮）。
+ * 纯渲染；草稿与保存都在 `Panel` 的 hooks 里。
+ */
+export function buildWorkspaceDialog(R, model) {
+  const e = R.createElement;
+  const wsModel = (model && model.workspaces) || {};
+  const handlers = (model && model.handlers) || {};
+  const paths = Array.isArray(wsModel.paths) ? wsModel.paths : [];
+  const draft = Array.isArray(wsModel.draft) ? wsModel.draft : [];
+  const current = model && typeof model.currentWorkspace === 'string' ? model.currentWorkspace : '';
+  const saving = !!wsModel.saving;
+  const body = [];
+  body.push(e('div', { key: 'd', style: styles.muted },
+    '勾选的工作区会被主动检查；全勾 = 管平台全部（含以后新建的）。关掉这个弹窗时写配置。'));
+  if (!paths.length) {
+    body.push(e('div', { key: 'empty', style: styles.tertiary },
+      '平台工作区表还没读到（或平台没有工作区）；这只是清单读不到，不影响已有报告。'));
+  } else {
+    body.push(e('div', { key: 'list', style: styles.wsList }, paths.map((path) => e('label', {
+      key: 'w:' + path,
+      style: styles.wsOption,
+    },
+    e('input', {
+      type: 'checkbox',
+      checked: draft.some((item) => sameWorkspace(item, path)),
+      disabled: saving,
+      onChange: () => { if (typeof handlers.toggleWorkspace === 'function') handlers.toggleWorkspace(path); },
+    }),
+    e('span', { style: styles.wsPath }, path)))));
+    const inList = !!current && paths.some((path) => sameWorkspace(path, current));
+    if (inList) {
+      const managed = draft.some((item) => sameWorkspace(item, current));
+      body.push(e('label', { key: 'stop', style: styles.wsOption },
+        e('input', {
+          type: 'checkbox',
+          checked: !managed,
+          disabled: saving,
+          onChange: () => { if (typeof handlers.toggleWorkspace === 'function') handlers.toggleWorkspace(current); },
+        }),
+        e('span', { style: styles.wsPath },
+          '取消后续对于本工作区（' + current + '）的检查。')));
+    }
+  }
+  return e('div', { key: 'wsDialog', style: styles.dialogBackdrop },
+    e('div', { role: 'dialog', 'aria-label': '管理工作区', style: styles.dialog },
+      e('div', { key: 't', style: styles.dialogTitle }, '管理工作区'),
+      ...body,
+      e('div', { key: 'foot', style: styles.dialogFoot }, [
+        e('span', { key: 'hint', style: styles.tertiary }, saving ? '保存中…' : (wsModel.text || '')),
+        e('button', {
+          key: 'close',
+          type: 'button',
+          style: { ...styles.button, ...(saving ? styles.disable : {}) },
+          disabled: saving || typeof handlers.closeWorkspaces !== 'function',
+          onClick: handlers.closeWorkspaces,
+        }, '关闭'),
+      ])));
+}
+
 /** 把面板的所有事实画成一棵树（纯函数；hooks 与异步都在外面）。 */
 function buildTree(R, model) {
   const e = R.createElement;
@@ -521,42 +649,46 @@ function buildTree(R, model) {
   children.push(e('div', { key: 'statusCard', style: styles.card }, statusChildren));
 
   // ---- 管理工作区（R-13：唯一字段 workspaces；空列表 = 管平台全部） ----
+  // 卡片只放入口与摘要；勾选在**弹窗**里做（2026-11-23 主人定：关掉弹窗时写配置）。
   const wsModel = model.workspaces || {};
-  const wsPaths = Array.isArray(wsModel.paths) ? wsModel.paths : [];
-  const wsDraft = Array.isArray(wsModel.draft) ? wsModel.draft : [];
   const wsChildren = [];
   wsChildren.push(e('div', { key: 'h', style: styles.title2 }, '管理工作区'));
   wsChildren.push(e('div', { key: 'd', style: styles.muted },
     '勾选的工作区会被主动检查（会话首条消息扫描、有缺项弹窗）。全勾 = 管平台全部（含以后新建的）；'
-    + '取消勾选的不检查。保存后按新范围走下次扫描；面板展示的仍是上次检查的结果。'));
-  if (!wsPaths.length) {
-    wsChildren.push(e('div', { key: 'empty', style: styles.tertiary },
-      '平台工作区表还没读到（或平台没有工作区）；这只是清单读不到，不影响上面已有报告。'));
-  } else {
-    wsChildren.push(e('div', { key: 'list', style: styles.wsList }, wsPaths.map((path) => e('label', {
-      key: 'w:' + path,
-      style: styles.wsOption,
-    },
-    e('input', {
-      type: 'checkbox',
-      checked: wsDraft.some((item) => sameWorkspace(item, path)),
-      disabled: !!wsModel.saving,
-      onChange: () => { if (typeof handlers.toggleWorkspace === 'function') handlers.toggleWorkspace(path); },
-    }),
-    e('span', { style: styles.wsPath }, path)))));
-    wsChildren.push(e('div', { key: 'row', style: styles.row }, [
-      e('button', {
-        key: 'save',
-        type: 'button',
-        style: { ...styles.button, ...(wsModel.saving ? styles.disable : {}) },
-        disabled: !!wsModel.saving || typeof handlers.saveWorkspaces !== 'function',
-        onClick: handlers.saveWorkspaces,
-      }, wsModel.saving ? '保存中…' : '保存管理工作区'),
-      e('span', { key: 'hint', style: styles.tertiary }, wsModel.text
-        || (wsModel.allMode ? '当前：管平台全部工作区' : '当前：管 ' + wsModel.managedCount + ' 个')),
-    ]));
-  }
+    + '在弹窗里勾选、关掉弹窗时写配置；面板展示的仍是上次检查的结果。'));
+  wsChildren.push(e('div', { key: 'row', style: styles.row }, [
+    e('button', {
+      key: 'open',
+      type: 'button',
+      style: { ...styles.button, ...(wsModel.saving ? styles.disable : {}) },
+      disabled: !!wsModel.saving || typeof handlers.openWorkspaces !== 'function',
+      onClick: handlers.openWorkspaces,
+    }, '管理工作区…'),
+    e('span', { key: 'hint', style: styles.tertiary }, wsModel.text
+      || (wsModel.allMode ? '当前：管平台全部工作区' : '当前：管 ' + wsModel.managedCount + ' 个')),
+  ]));
   children.push(e('div', { key: 'wsCard', style: styles.card }, wsChildren));
+
+  // ---- 各工作区扫描结果（宿主汇总；队列顺序） ----
+  const aggRows = workspaceStatusRowsOf(model.aggregate, model.currentWorkspace);
+  const aggChildren = [];
+  aggChildren.push(e('div', { key: 'h', style: styles.title2 }, '各工作区扫描结果'));
+  aggChildren.push(e('div', { key: 'd', style: styles.muted },
+    '宿主按队列逐个扫描，这里是每个工作区**最近一次**的结果（"上次检查"，不实时刷新）。'
+    + '▶ = 当前工作区。'));
+  if (aggRows.length) {
+    aggChildren.push(e('div', { key: 'list', style: styles.wsList }, aggRows.map((row) => e('div', {
+      key: 'agg:' + row.root,
+      style: styles.aggRow,
+    },
+    e('span', { key: 'path', style: styles.wsPath }, (row.current ? '▶ ' : '') + row.root),
+    e('span', { key: 'status', style: { color: toneColor(row.tone) } }, row.text)))));
+  } else {
+    aggChildren.push(e('div', { key: 'empty', style: styles.tertiary },
+      '还没有汇总（宿主还没上报扫描结果，或宿主是旧版本）。'));
+  }
+  children.push(e('div', { key: 'aggCard', style: styles.card }, aggChildren));
+  if (wsModel.open) children.push(buildWorkspaceDialog(R, model));
 
   // ---- 勾选清单（按工作区分组）----
   if (totalCount > 0) {
@@ -745,7 +877,9 @@ export function createClientPlugin({ React, ctx, log }) {
     const useWorkspaces = props && props.useWorkspaces;
     const wsSnapshot = typeof useWorkspaces === 'function' ? useWorkspaces((snapshot) => snapshot) : null;
     // 管理工作区：草稿为 null 时按"已保存的配置"显示。
-    const [wsEdit, setWsEdit] = R.useState({ draft: null, saving: false, text: '' });
+    const [wsEdit, setWsEdit] = R.useState({ open: false, draft: null, saving: false, text: '' });
+    // 多工作区汇总（宿主写、每个工作区都有一份）。
+    const [aggregate, setAggregate] = R.useState(null);
     const [view, setView] = R.useState({
       phase: 'init', text: '正在读报告…', tone: 'muted',
       summary: null, report: null, from: '', tried: [],
@@ -782,7 +916,8 @@ export function createClientPlugin({ React, ctx, log }) {
     const wsPaths = platformPaths.concat(
       managedPaths.filter((path) => !platformPaths.some((item) => sameWorkspace(item, path))),
     );
-    const wsDraft = Array.isArray(wsEdit.draft) ? wsEdit.draft : wsPaths;
+    const wsSaved = managedPaths.length > 0 ? managedPaths : wsPaths;
+    const wsDraft = Array.isArray(wsEdit.draft) ? wsEdit.draft : wsSaved;
     const busy = fix.phase === 'requesting' || fix.phase === 'fixing';
 
     /** 读报告：先小摘要（几 KB），再全量报告（勾选清单要 `objects[]`）。 */
@@ -803,6 +938,9 @@ export function createClientPlugin({ React, ctx, log }) {
       }
       const gotReport = await readJsonRel(files, REPORT_REL_PATH, sessionIds, 12000);
       if (!gotReport.ok && gotReport.tried && gotReport.tried.length) tried.push(...gotReport.tried);
+      // 多工作区汇总：宿主写到每个被管工作区的 `.dsh-veneer/workspaces.json`；读当前工作区这份即可。
+      const gotAggregate = await readJsonRel(files, AGGREGATE_REL, sessionIds, 8000);
+      if (gotAggregate.ok) setAggregate(gotAggregate.value);
       const nextReport = gotReport.ok ? gotReport.value : null;
       const nextSummary = gotSummary.ok ? gotSummary.value : null;
       if (!nextReport && !nextSummary) {
@@ -997,47 +1135,59 @@ export function createClientPlugin({ React, ctx, log }) {
       });
     };
 
-    /** 管理工作区：勾选切换（草稿只在页面里，保存才写配置）。 */
+    /** 管理工作区：打开弹窗（草稿为空 = 按已保存的配置显示）。 */
+    const openWorkspaces = () => {
+      if (wsEdit.saving) return;
+      setWsEdit({ open: true, draft: null, saving: false, text: '' });
+    };
+
+    /** 管理工作区：勾选切换（草稿只在弹窗里，**关掉弹窗时**写配置）。 */
     const toggleWorkspace = (path) => {
       if (wsEdit.saving) return;
       setWsEdit((prev) => {
-        const current = Array.isArray(prev.draft) ? prev.draft : wsPaths;
+        const current = Array.isArray(prev.draft) ? prev.draft : wsSaved;
         const draft = current.some((item) => sameWorkspace(item, path))
           ? current.filter((item) => !sameWorkspace(item, path))
           : current.concat(path);
-        return { draft, saving: false, text: '' };
+        return { open: prev.open !== false, draft, saving: false, text: '' };
       });
     };
 
-    /** 管理工作区：保存（全勾 → 写空列表 = 管平台全部；否则写勾选的路径）。 */
-    const saveWorkspaces = async () => {
+    /** 管理工作区：关弹窗 = 有改动就写配置（全勾 → 空列表 = 管平台全部）。 */
+    const closeWorkspaces = async () => {
+      const draft = Array.isArray(wsEdit.draft) ? wsEdit.draft : wsSaved;
+      const value = workspacesValueOf(draft, wsPaths);
+      const savedValue = managedPaths.map((path) => ({ path }));
+      // 没改就只是关掉；有改动才写。
+      if (JSON.stringify(value) === JSON.stringify(savedValue)) {
+        setWsEdit({ open: false, draft: null, saving: false, text: '' });
+        return;
+      }
       if (!form || typeof form.mutate !== 'function') {
         setWsEdit((prev) => ({ ...prev, text: '这个页面没有保存通道（form.mutate），改不了管理工作区' }));
         return;
       }
-      const draft = Array.isArray(wsEdit.draft) ? wsEdit.draft : wsPaths;
       if (!draft.length) {
         setWsEdit((prev) => ({ ...prev, text: '至少留一个工作区：空列表表示"管全部"，无法表示"一个都不管"' }));
         return;
       }
-      const allSelected = wsPaths.length > 0 && wsPaths.every((path) => draft.some((item) => sameWorkspace(item, path)));
-      const value = allSelected ? [] : draft.map((path) => ({ path }));
-      setWsEdit({ draft: null, saving: true, text: '保存中…' });
+      setWsEdit((prev) => ({ ...prev, saving: true, text: '保存中…' }));
       let accepted;
       try {
         accepted = await form.mutate([{ op: 'set', path: ['workspaces'], value }], revision);
       } catch (err) {
-        setWsEdit({ draft: null, saving: false, text: '保存失败：' + String((err && err.message) || err) });
+        setWsEdit((prev) => ({ ...prev, saving: false, text: '保存失败：' + String((err && err.message) || err) }));
         return;
       }
       if (accepted === false) {
-        setWsEdit({ draft: null, saving: false, text: '宿主拒绝了这次修改（配置已被并发修改或值不可用）' });
+        setWsEdit((prev) => ({ ...prev, saving: false, text: '宿主拒绝了这次修改（配置已被并发修改或值不可用）' }));
         return;
       }
       setWsEdit({
+        open: false,
         draft: null,
         saving: false,
-        text: allSelected ? '已保存：管平台全部工作区（下次扫描生效）' : '已保存：管 ' + value.length + ' 个工作区（下次扫描生效）',
+        text: value.length ? '已保存：管 ' + value.length + ' 个工作区（下次扫描生效）' : '已保存：管平台全部工作区（下次扫描生效）',
       });
       logEvent('ui.workspaces.saved', '已保存管理工作区', { count: value.length });
     };
@@ -1055,8 +1205,9 @@ export function createClientPlugin({ React, ctx, log }) {
       },
       toggle: togglePick,
       fix: () => { void submitFix(); },
+      openWorkspaces,
       toggleWorkspace,
-      saveWorkspaces: () => { if (!wsEdit.saving) void saveWorkspaces(); },
+      closeWorkspaces: () => { if (!wsEdit.saving) void closeWorkspaces(); },
     };
 
     const diagLines = (() => {
@@ -1081,9 +1232,11 @@ export function createClientPlugin({ React, ctx, log }) {
       handlers,
       diagLines,
       currentWorkspace,
+      aggregate: aggregate || null,
       workspaces: {
         paths: wsPaths,
         draft: wsDraft,
+        open: !!wsEdit.open,
         saving: !!wsEdit.saving,
         text: wsEdit.text || '',
         allMode: managedPaths.length === 0,

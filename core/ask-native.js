@@ -3,16 +3,16 @@
 // 浏览器面板可以自己画弹窗；但"刚打开一条会话、还没进面板"这一刻没有可用的客户端钩子，
 // 所以用**宿主原生**对话框：起 `powershell.exe` 跑 `scripts/dsh-veneer-ask.ps1`。
 //
-// 为什么是**两步**（2026-11-23 修 E-013）：MessageBox 的「取消」和"点 X 关窗"都返回 Cancel，
-// 无法区分；三按钮 Yes/No/Cancel 会把"顺手关窗"误当成"不再检查本工作区"（把工作区从管理列表
-// 摘掉，以后不再主动检查）。改成两个 Yes/No 框：
-//   框一：现在修复？（是 = 修复全部缺项并弹 UAC；否 = 进入框二）
-//   框二：以后还自动检查本工作区？（是 = 不再检查并从管理列表摘掉；否/关窗 = 以后再说）
-// 退出码：6 = 修复、7 = 以后再说、8 = 不再检查；其它 = 失败（如实报告，不猜用户点了什么）。
+// 只问一件事（2026-11-23 主人定，简化）：**现在修复吗？**
+//   · 是 = 6 → 修复全部缺项（会弹 UAC）；
+//   · 否 / 直接关窗 = 7 → 以后再说。
+//
+// "以后不再检查本工作区"**不进弹窗**（关窗=否，把配置写进弹窗会误伤）：它改成配置页里的
+// 一个勾选「取消后续对于本工作区（工作区名）的检查。」，由用户在面板里明确勾选保存。
+// 这样弹窗不会再改配置，也就不需要第二个框（E-013 的两步弹窗随之删掉）。
 //
 // 传参纪律（与 `adapter/acl.js` 同一手法）：**参数只经环境变量**，不在命令行拼 JSON。
-//   · `DSH_VENEER_ASK_TEXT`：第一个框正文（含工作区与缺项数；这里拼好，脚本只负责显示）；
-//   · `DSH_VENEER_ASK_TEXT2`：第二个框正文；
+//   · `DSH_VENEER_ASK_TEXT`：框正文（含工作区与缺项数；这里拼好，脚本只负责显示）；
 //   · `DSH_VENEER_ASK_ROOT` / `DSH_VENEER_ASK_MISSING`：结构化事实（脚本/支持人员可复核）。
 //
 // 异常边界：**永不 reject**；进程起不来 / 超时 / 退出码不认识都返回 `{ok:false, reason}`。
@@ -29,14 +29,10 @@ export const ASK_TIMEOUT_MS = 300000;
 export const ASK_EXIT = Object.freeze({
   FIX: 6,
   LATER: 7,
-  IGNORE: 8,
 });
 
-/** 第二个框的正文环境变量名（脚本读它；名字一起改）。 */
-export const TEXT2_ENV = 'DSH_VENEER_ASK_TEXT2';
-
-/** 第一个框的正文环境变量名。 */
-export const TEXT1_ENV = 'DSH_VENEER_ASK_TEXT';
+/** 框正文的环境变量名（脚本读它；名字一起改）。 */
+export const TEXT_ENV = 'DSH_VENEER_ASK_TEXT';
 
 /** PowerShell 参数（与 `adapter/acl.js` 的同一组；这里用 `-File` 直接跑脚本）。 */
 const PS_ARGS = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File'];
@@ -75,27 +71,9 @@ export function buildAskText(input = {}) {
     }
   }
   lines.push('');
-  lines.push('按钮：是 = 现在修复（会弹 UAC，只改这些对象缺的项）；');
-  lines.push('      否 = 以后再说（不会再把本工作区列为“不再检查”）。');
-  return lines.join('\n');
-}
-
-/**
- * 第二个框的正文（"以后还自动检查吗"）。**关窗等于"否"**，所以不能把这件事塞进第一个框。
- * @param {{root:string, missing:number}} input
- */
-export function buildAskText2(input = {}) {
-  const root = typeof input.root === 'string' ? input.root : '';
-  const missing = countOf(input.missing);
-  const lines = [
-    '以后还自动检查这个工作区吗？',
-    '',
-    '工作区：' + root,
-    '当前缺项对象：' + missing + ' 个',
-    '',
-    '按钮：是 = 以后不再自动检查（把本工作区从管理列表摘掉，面板可手动恢复）；',
-    '      否（或直接关窗）= 继续自动检查，这次先不处理。',
-  ];
+  lines.push('现在修复吗？');
+  lines.push('是 = 现在修复（会弹 UAC，只改这些对象缺的项）');
+  lines.push('否 / 关窗 = 以后再说（要停止检查本工作区，请到插件配置页勾选「取消后续对于本工作区的检查」）');
   return lines.join('\n');
 }
 
@@ -111,7 +89,7 @@ export function buildAskText2(input = {}) {
  *   · `execImpl`   进程注入点（签名同 `adapter/dsh.runProcess` 的 runner）
  *   · `execFileImpl` 更底层注入点（签名同 `node:child_process.execFile`）
  *   · `env` / `timeoutMs` / `title`
- * @returns {Promise<{ok:true, value:'fix'|'later'|'ignore'}|{ok:false, reason:string, code:string}>}
+ * @returns {Promise<{ok:true, value:'fix'|'later'}|{ok:false, reason:string, code:string}>}
  */
 export async function askFix(options = {}) {
   const root = typeof options.root === 'string' ? options.root.trim() : '';
@@ -129,15 +107,11 @@ export async function askFix(options = {}) {
   const text = typeof options.text === 'string' && options.text
     ? options.text
     : buildAskText({ root, missing, samples: options.samples });
-  const text2 = typeof options.text2 === 'string' && options.text2
-    ? options.text2
-    : buildAskText2({ root, missing });
   const env = {
     ...(options.env && typeof options.env === 'object' ? options.env : process.env),
     DSH_VENEER_ASK_ROOT: root,
     DSH_VENEER_ASK_MISSING: String(missing),
-    [TEXT1_ENV]: text,
-    [TEXT2_ENV]: text2,
+    [TEXT_ENV]: text,
   };
   const timeout = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
     ? options.timeoutMs
@@ -156,10 +130,9 @@ export async function askFix(options = {}) {
   if (result.timedOut) {
     return { ok: false, reason: '确认框超时（' + timeout + ' ms）：没有人点按钮', code: 'ask-timeout' };
   }
-  // 6/7/8 是**业务退出码**；execFile 对非零退出会给 err，所以先看 code。
+  // 6/7 是**业务退出码**；execFile 对非零退出会给 err，所以先看 code。
   if (result.code === ASK_EXIT.FIX) return { ok: true, value: 'fix' };
   if (result.code === ASK_EXIT.LATER) return { ok: true, value: 'later' };
-  if (result.code === ASK_EXIT.IGNORE) return { ok: true, value: 'ignore' };
   const detail = String((result.stderr || result.error || '') || '').trim();
   return {
     ok: false,

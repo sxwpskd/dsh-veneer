@@ -35,6 +35,55 @@ export function resetSharedLog() {
 /** 当前日志口挂的是哪里的文件（'' = 还没挂）。 */
 let sinkTarget = '';
 
+// ---------------------------------------------------------------------------
+// 事件去重（2026-11-23 发现 E-012 的真实原因）
+//
+// Loader 在同一个宿主进程里**重载插件行**时（安装/配置变更），`sharedLog` 的单例还在，
+// 内存环里是旧事件；每次重载都会 `attachFileSink` 一次，把**历史事件再补写一遍**，
+// 日志里就出现同一 bootId/timestamp 的整块重复。这里在 sink 外面套一层"同一条事件只写一次"
+// （键 = bootId|ts|level|event|message；有界集合，超了清空从头记）。
+// ---------------------------------------------------------------------------
+
+/** 已经写进文件的键（进程级，有界）。 */
+const writtenKeys = new Set();
+
+/** 上限：超过就清空（只影响去重范围，不影响正确性）。 */
+const WRITTEN_LIMIT = 10000;
+
+/** 一条事件的去重键。 */
+export function dedupeKeyOf(event) {
+  const value = event && typeof event === 'object' ? event : {};
+  return [value.bootId || '', value.ts || '', value.level || '', value.event || '', value.message || ''].join('|');
+}
+
+/**
+ * 给文件 sink 套一层"同一条事件只写一次"（供测试与装配共用）。
+ * @param {object} sink `createFileSink()` 的返回
+ * @returns {object} 包装后的 sink（保留 write/flush/disabled/reason/path）
+ */
+export function dedupeSink(sink) {
+  return {
+    write(event) {
+      const key = dedupeKeyOf(event);
+      if (writtenKeys.has(key)) return false;
+      if (writtenKeys.size >= WRITTEN_LIMIT) writtenKeys.clear();
+      writtenKeys.add(key);
+      return sink.write(event);
+    },
+    flush() {
+      return typeof sink.flush === 'function' ? sink.flush() : true;
+    },
+    get disabled() { return !!sink.disabled; },
+    get reason() { return sink.reason || ''; },
+    get path() { return sink.path || ''; },
+  };
+}
+
+/** 只给测试/重启用：清空去重集合。 */
+export function resetLogDedupe() {
+  writtenKeys.clear();
+}
+
 /**
  * 把日志挂到某个工作区的文件上（同一路径重复调用不重复挂）。
  * @param {object} log 共享日志口
@@ -53,7 +102,7 @@ export function attachWorkspaceLog(log, fs, root) {
       try { log.warn('日志文件写不进去（' + base + '）：' + reason); } catch { /* 报告失败就算了 */ }
     },
   });
-  const ok = log.attachFileSink(sink);
+  const ok = log.attachFileSink(dedupeSink(sink));
   if (ok) sinkTarget = base;
   return ok;
 }
@@ -76,7 +125,7 @@ export function attachBootstrapLog(log, fs) {
     keep: 1,
     onFailure: () => { /* 引导日志写不了也不外溢 */ },
   });
-  const ok = log.attachFileSink(sink);
+  const ok = log.attachFileSink(dedupeSink(sink));
   if (ok) sinkTarget = dir;
   return ok;
 }

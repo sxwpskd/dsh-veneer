@@ -1,5 +1,15 @@
 # 更新日志
 
+## 0.4.2 — 2026-11-23
+
+修 **E-012 日志重复**（真实原因查明）：插件行在同一宿主进程里被 Loader 重载时（安装/配置变更），
+`sharedLog` 单例还在、内存环里是旧事件，每次 `attachFileSink` 都把历史再补写一遍——日志里出现
+同一 `bootId`/时间戳的整块重复。
+
+- `log/shared.js` 给文件 sink 套一层**事件去重**（键 = `bootId|ts|level|event|message`，有界集合），
+  重载补写不再重复，新事件照常写；导出 `dedupeSink` / `dedupeKeyOf` / `resetLogDedupe` 供测试。
+- 测试：`veneer-log-test` +4（111 项）覆盖"同事件只写一次 / 重载补写不重复 / 新事件照常"。
+
 ## 0.4.1 — 2026-11-23
 
 修 0.4.0 原生弹窗的一个**误操作风险**（ERRATA E-013）：`MessageBox` 的「取消」和"点 X 关窗"不可区分，

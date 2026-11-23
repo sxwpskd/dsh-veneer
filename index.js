@@ -24,7 +24,7 @@
 // 移除：卸载时 Cordis 会 dispose 本文件返回的清理函数；工作区里的报告文件不自动删
 //   （用户自己创建的认知材料不该被插件悄悄删掉），要清就删 `review/veneer-state.json`。
 import { planWorkspaces } from './core/plan.js';
-import { workspacePlugin } from './core/workspace-instance.js';
+import { workspacePlugin, requestRescans } from './core/workspace-instance.js';
 import { createDsh } from './adapter/dsh.js';
 import { createFs } from './adapter/fs.js';
 import { attachBootstrapLog, sharedLog } from './log/shared.js';
@@ -32,7 +32,7 @@ import { guardSync } from './exception/guard.js';
 import { CODES } from './exception/codes.js';
 import { withDefaults, resolveVolatile } from './config/defaults.js';
 import { parseFixRequest, publishFixRequest, fixRequestChanged } from './core/fix-bus.js';
-import { snapshotWorkspaces, subscribeWorkspaces } from './core/aggregate.js';
+import { snapshotWorkspaces, summarizeWorkspaces, subscribeWorkspaces } from './core/aggregate.js';
 import { joinPath } from './core/persist.js';
 
 export const name = 'dsh-veneer';
@@ -138,24 +138,38 @@ export function apply(ctx, config) {
   const mountedRoots = [];
   let aggTimer = null;
   let aggDispose = null;
+  let lastDetails = '';
 
   /**
    * 把"所有工作区的最新扫描摘要"写到每个被管工作区里（面板读当前工作区那份就能展示全部）。
    * 2026-11-23 主人指出"配置显示管全部、实际只看到 DSH"：浏览器只能读当前工作区，所以由宿主分发。
+   *
+   * 两个文件（主人 2026-11-23 现场反馈后拆开）：
+   *   · `workspaces.json`：**只有摘要**（状态 / 计数 / 原因，几 KB）——面板每次都能读动；
+   *   · `workspaces-details.json`：每个工作区的缺项明细——内容变了才重写，面板按块读。
    */
   const writeAggregate = () => {
-    const payload = JSON.stringify({
+    const snapshot = snapshotWorkspaces();
+    const summary = JSON.stringify({
       version: 1,
       updatedAt: new Date().toISOString(),
-      workspaces: snapshotWorkspaces(),
+      workspaces: summarizeWorkspaces(snapshot),
     }, null, 2);
+    const details = JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      workspaces: snapshot,
+    });
+    const detailsChanged = details !== lastDetails;
+    lastDetails = details;
     const fs = createFs();
     for (const root of mountedRoots) {
       if (!root) continue;
       try {
         const dir = joinPath(root, '.dsh-veneer');
         fs.mkdirp(dir);
-        fs.writeTextAtomic(joinPath(dir, 'workspaces.json'), payload);
+        fs.writeTextAtomic(joinPath(dir, 'workspaces.json'), summary);
+        if (detailsChanged) fs.writeTextAtomic(joinPath(dir, 'workspaces-details.json'), details);
       } catch { /* 写不进去不影响扫描本身 */ }
     }
   };
@@ -278,6 +292,12 @@ export function apply(ctx, config) {
       volatileDispose = ctx.on('loader/volatile-update', (changed) => {
         if (disposed) return;
         try {
+          // 「重新扫描」：面板写时间戳令牌 → 每个实例各排一次扫描（重操作；读结果靠页面轮询）。
+          if (Array.isArray(changed) && changed.some((path) => Array.isArray(path) && path[0] === 'scanRequest')) {
+            const notified = requestRescans();
+            log.info('收到「重新扫描」请求：已通知 ' + notified + ' 个工作区实例（串行队列逐个重扫）');
+            return;
+          }
           if (!fixRequestChanged(changed)) return;
           const rawToken = resolveVolatile(raw.fixRequest);
           if (typeof rawToken !== 'string' || !rawToken.trim()) return; // 清空：不是请求

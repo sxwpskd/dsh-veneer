@@ -39,6 +39,7 @@ export const DEFAULT_CONFIG = {
   // 标 volatile 后 Loader 只改它时不会重载插件行，而是发 `loader/volatile-update`
   //（与 dsh-milieu 的即时字段同一机制）。
   fixRequest: '',
+  scanRequest: 0,
 };
 
 /**

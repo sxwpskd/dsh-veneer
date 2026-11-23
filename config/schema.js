@@ -47,9 +47,11 @@ export const Config = Schema.object({
   autoPrompt: Schema.boolean().default(DEFAULT_CONFIG.autoPrompt),
   // ---- v2 · 修复令牌（B 通道；即时字段） ----
   fixRequest: Schema.string().default(DEFAULT_CONFIG.fixRequest).volatile(),
+  // ---- v2 · 「重新扫描」令牌（即时字段）：面板按钮写时间戳 → 宿主排队重扫全部工作区实例 ----
+  scanRequest: Schema.number().default(0).volatile(),
 });
 
 /** 列出即时字段名（启动器 / 测试用；与上面 `.volatile()` 的字段保持一致）。 */
-export const VOLATILE_FIELDS = Object.freeze(['fixRequest']);
+export const VOLATILE_FIELDS = Object.freeze(['fixRequest', 'scanRequest']);
 
 export default Config;

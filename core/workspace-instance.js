@@ -76,8 +76,7 @@ export function sessionCwdOf(session) {
   return typeof session.cwd === 'string' ? session.cwd : '';
 }
 
-/** 一个工作区实例的装配（供 `workspacePlugin.apply` 调用；离线测试直接调它）。 */
-export function applyChild(ctx, rawConfig, deps = {}) {
+/** 一个工作区实例的装配（供 `workspacePlugin.apply` 调用；离线测试直接调它）。 */export function applyChild(ctx, rawConfig, deps = {}) {
   const cfg = withDefaults(rawConfig);
   // **每个实例一个日志口**（2026-11-23，0.4.5）：以前共用进程级单例 + 单一文件 sink，
   // 多工作区共存时每个实例 `attachFileSink` 都会把 sink 换成自己的 → 事件全写到"最后挂的那个
@@ -207,14 +206,23 @@ export function applyChild(ctx, rawConfig, deps = {}) {
               written: !!result.value.written,
               reportPath: result.value.reportPath || '',
             });
-            // 汇总（多工作区展示用）：只放摘要（状态 + 计数 + 时间 + 失败/根归宿主的说明）。
-            // 明细不塞这里——文件会被撑爆；面板只从"当前工作区自己的 report"读明细。
+            // 汇总（多工作区展示用）：摘要 + 缺项明细（明细单独写一个文件，见 index.js）。
+            let objects = [];
+            try {
+              const rep = readReport();
+              if (rep && rep.ok === true) {
+                objects = missingObjectsOf(rep.value)
+                  .slice(0, 2000)
+                  .map((obj) => ({ path: obj.path, items: obj.items, isDir: !!obj.isDir }));
+              }
+            } catch { objects = []; }
             reportWorkspaceScan({
               root: rootNow(),
               status: result.value.status || 'unknown',
               counts: result.value.counts || {},
               scannedAt: new Date(now()).toISOString(),
               source,
+              objects,
               reason: Array.isArray(result.value.rootMissing) && result.value.rootMissing.length
                 ? '根上没有物化三项（属于宿主，本插件不动手）'
                 : '',
@@ -245,6 +253,14 @@ export function applyChild(ctx, rawConfig, deps = {}) {
     scanChain = next.then(() => undefined, () => undefined);
     return next;
   };
+
+  // 「重新扫描」入口：面板按钮写 volatile `scanRequest` → index 调 requestRescans() →
+  // 每个实例把自己排进全局串行队列（这就是"重操作"；5 秒轮询只读结果、不触发扫描）。
+  const unregisterRescan = registerRescanHook(() => {
+    if (disposed) return;
+    log.info('收到重新扫描请求：排进串行队列');
+    enqueueScan(host, 'manual', () => {});
+  });
 
   // ------------------------------------------------------------------
   // 修复（串行；令牌 + 弹窗"去修复"共用）
@@ -634,7 +650,32 @@ export function applyChild(ctx, rawConfig, deps = {}) {
       bridge = null;
     }
     try { if (fiber && typeof fiber.dispose === 'function') fiber.dispose(); } catch { /* 同上 */ }
+    try { unregisterRescan(); } catch { /* 同上 */ }
   };
+}
+
+// ---------------------------------------------------------------------------
+// 「重新扫描」的跨实例登记（index 的 volatile 监听 → 所有工作区实例各排一次扫描）
+// ---------------------------------------------------------------------------
+const rescanHooks = new Set();
+
+/**
+ * 登记一个"请重扫"回调；返回注销函数。
+ * @param {Function} fn
+ */
+export function registerRescanHook(fn) {
+  if (typeof fn !== 'function') return () => {};
+  rescanHooks.add(fn);
+  return () => { rescanHooks.delete(fn); };
+}
+
+/** 让每个已挂实例各排一次扫描；返回通知到的实例数。 */
+export function requestRescans() {
+  const list = Array.from(rescanHooks);
+  for (const fn of list) {
+    try { fn(); } catch { /* 一个实例失败不挡其它 */ }
+  }
+  return list.length;
 }
 
 /**

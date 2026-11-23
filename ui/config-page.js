@@ -435,6 +435,10 @@ const styles = {
   wsPath: { overflowWrap: 'anywhere' },
   aggRow: { display: 'flex', alignItems: 'baseline', gap: '8px', padding: '2px 0', fontSize: '12px', flexWrap: 'wrap' },
   itemReadonly: { display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 4px', opacity: 0.7, fontSize: '12px' },
+  treeRow: { display: 'flex', alignItems: 'center', gap: '4px' },
+  caret: { background: 'transparent', border: 'none', cursor: 'pointer', width: 18, padding: 0, color: 'inherit', font: 'inherit' },
+  caretSpacer: { display: 'inline-block', width: 18 },
+  partialMark: { color: TOKENS.warn, fontSize: 12 },
   dialogBackdrop: { position: 'fixed', inset: '0', zIndex: 2147483000, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' },
   dialog: { width: 'min(560px, calc(100vw - 48px))', maxHeight: 'min(640px, calc(100vh - 48px))', overflow: 'auto', background: TOKENS.bg, color: TOKENS.text, border: '1px solid ' + TOKENS.border, borderRadius: 10, padding: '14px 16px', boxShadow: '0 8px 24px rgba(0,0,0,0.25)' },
   dialogTitle: { fontSize: '15px', fontWeight: 600, marginBottom: '6px' },
@@ -514,38 +518,118 @@ function buildItemRow(e, object, selectedSet, busy, onToggle) {
   ]);
 }
 
+// ---------------------------------------------------------------------------
+// 缺项对象 → 目录树（2026-11-23 主人要求：按工作区收起 / 有层级 / 父子三态联动）
+// ---------------------------------------------------------------------------
+
 /**
- * 宿主汇总里的"每个工作区的缺项对象" → 面板分组（按队列顺序）。
- * 当前工作区可勾选修复；其它工作区只读展示（修复要回它自己的工作区打开面板）。
- *
- * @param {object|null} aggregate
- * @param {string} [currentWorkspace]
- * @returns {Array<{workspace:string, current:boolean, objects:Array<{path:string, missing:string[], isDir:boolean}>}>}
+ * 对象绝对路径 → 相对工作区根的路径段。根不在前缀里时退回去掉盘符的形式。
+ * @param {string} rootPath
+ * @param {string} objectPath
+ * @returns {string[]}
  */
-export function aggregateObjectGroups(aggregate, currentWorkspace = '') {
-  const items = aggregate && Array.isArray(aggregate.workspaces) ? aggregate.workspaces : [];
-  const groups = [];
-  for (const item of items) {
-    if (!item || typeof item.root !== 'string' || !item.root) continue;
-    const objects = Array.isArray(item.objects) ? item.objects : [];
-    if (!objects.length) continue;
-    const list = [];
-    for (const obj of objects) {
-      if (!obj || typeof obj.path !== 'string' || !obj.path) continue;
-      list.push({
-        path: obj.path,
-        missing: (Array.isArray(obj.items) ? obj.items : []).filter((name) => ITEM_ORDER.includes(name)),
-        isDir: !!obj.isDir,
-      });
+export function pathSegmentsOf(rootPath, objectPath) {
+  const root = String(rootPath || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const full = String(objectPath || '').replace(/\\/g, '/');
+  const lower = full.toLowerCase();
+  let rel;
+  if (root && lower.startsWith(root + '/')) rel = full.slice(root.length + 1);
+  else rel = full.replace(/^[A-Za-z]:\//, '');
+  return rel.split('/').filter(Boolean);
+}
+
+/**
+ * 把缺项对象列表变成目录树（根节点 = 工作区）。
+ *
+ * @param {string} rootPath 工作区根
+ * @param {Array<{path:string, missing:string[], isDir?:boolean}>} objects
+ * @returns {{name:string, path:string, isDir:boolean, object:object|null, children:Array}}
+ */
+export function buildObjectTree(rootPath, objects) {
+  const root = {
+    name: String(rootPath || ''), path: String(rootPath || ''), isDir: true, object: null, children: [],
+  };
+  const byKey = new Map();
+  byKey.set('', root);
+  /** 按相对键取/建目录节点（同一个键只建一次）。 */
+  const ensureDir = (key, name, parent) => {
+    let node = byKey.get(key);
+    if (!node) {
+      node = {
+        name,
+        path: parent.path.replace(/[\\/]+$/, '') + '\\' + name,
+        isDir: true,
+        object: null,
+        children: [],
+      };
+      parent.children.push(node);
+      byKey.set(key, node);
     }
-    if (!list.length) continue;
-    groups.push({
-      workspace: item.root,
-      current: !!currentWorkspace && sameWorkspace(item.root, currentWorkspace),
-      objects: list,
-    });
+    return node;
+  };
+  for (const obj of Array.isArray(objects) ? objects : []) {
+    if (!obj || typeof obj.path !== 'string' || !obj.path) continue;
+    const segments = pathSegmentsOf(rootPath, obj.path);
+    if (!segments.length) continue;
+    let key = '';
+    let parent = root;
+    for (let index = 0; index < segments.length; index += 1) {
+      const nextKey = key ? key + '/' + segments[index] : segments[index];
+      const last = index === segments.length - 1;
+      const node = ensureDir(nextKey, segments[index], parent);
+      if (last) {
+        // 目录本身也可能是一个缺项对象（例如缺项的是 lab 这个目录）——保留它的 object。
+        node.object = obj;
+      }
+      parent = node;
+      key = nextKey;
+    }
   }
-  return groups;
+  return root;
+}
+
+/** 一个节点下的所有**缺项对象**路径（目录节点 = 它自己 + 它下面所有文件）。 */
+export function collectLeafPaths(node) {
+  const out = [];
+  const walk = (item) => {
+    if (!item) return;
+    for (const child of item.children || []) walk(child);
+    if (item.object) out.push(item.object.path);
+  };
+  walk(node);
+  return out;
+}
+
+/**
+ * 一个节点当前的三态：`on`（全选）/ `partial`（部分）/ `off`（没选）。
+ * @returns {'on'|'partial'|'off'}
+ */
+export function treeCheckState(node, selectedSet) {
+  const leaves = collectLeafPaths(node);
+  if (!leaves.length) return 'off';
+  let on = 0;
+  for (const path of leaves) if (selectedSet && selectedSet.has(path)) on += 1;
+  if (on === 0) return 'off';
+  return on === leaves.length ? 'on' : 'partial';
+}
+
+/**
+ * 点一个节点后的新选择：
+ *   · 已全选 → 取消它下面全部文件；
+ *   · 否则（off/partial）→ 把它下面全部文件选上。
+ * 目录被勾选 = 它下面所有缺项对象都会物化（请求里带的是展开后的文件）。
+ *
+ * @param {object} node
+ * @param {Set<string>|string[]} selectedSet
+ * @returns {string[]} 新的已选文件路径数组
+ */
+export function toggleTreeSelection(node, selectedSet) {
+  const set = selectedSet instanceof Set ? new Set(selectedSet) : new Set(Array.isArray(selectedSet) ? selectedSet : []);
+  const state = treeCheckState(node, set);
+  const leaves = collectLeafPaths(node);
+  if (state === 'on') for (const path of leaves) set.delete(path);
+  else for (const path of leaves) set.add(path);
+  return Array.from(set);
 }
 export function workspacesValueOf(draft, paths) {
   const list = (Array.isArray(draft) ? draft : []).filter((path) => typeof path === 'string' && path);
@@ -719,14 +803,12 @@ function buildTree(R, model) {
   children.push(e('div', { key: 'aggCard', style: styles.card }, aggChildren));
   if (wsModel.open) children.push(buildWorkspaceDialog(R, model));
 
-  // ---- 勾选清单（按工作区分组：当前工作区可勾选，其它工作区只读展示）----
-  const listGroups = Array.isArray(model.aggregateGroups) && model.aggregateGroups.length
-    ? model.aggregateGroups
-    : groups.map((group) => ({ workspace: group.workspace, objects: group.objects, current: true }));
-  if (listGroups.length > 0) {
+  // ---- 勾选清单：当前工作区的目录树（可折叠；父/子三态联动）----
+  const tree = model.tree || null;
+  if (tree && totalCount > 0) {
     const selectChildren = [];
     selectChildren.push(e('div', { key: 'head', style: styles.row }, [
-      e('span', { key: 'stat', style: styles.title2 }, '已选 ' + selectedCount + ' / 本工作区共 ' + totalCount),
+      e('span', { key: 'stat', style: styles.title2 }, '已选 ' + selectedCount + ' / 共 ' + totalCount),
       e('button', {
         key: 'all',
         type: 'button',
@@ -741,29 +823,62 @@ function buildTree(R, model) {
         disabled: !!busy || selectedCount === 0,
         onClick: handlers.selectNone,
       }, '全不选'),
-      e('span', { key: 'hint', style: styles.tertiary }, '默认全选；只有当前工作区可勾选修复，其它工作区只读展示'),
+      e('span', { key: 'hint', style: styles.tertiary }, '勾目录 = 它下面所有缺项一起修；取消子项会自动回退父项状态'),
     ]));
-    const listChildren = [];
-    for (const group of listGroups) {
-      const readonly = group.current === false;
-      listChildren.push(e('div', {
-        key: 'g:' + (group.workspace || '?'),
-        style: styles.groupHead,
-      }, (group.workspace || '（未知工作区）') + '  ·  ' + group.objects.length + ' 个缺项对象'
-        + (readonly ? '（只读：在它的工作区打开面板才能修）' : '')));
-      for (const object of group.objects) {
-        listChildren.push(readonly
-          ? e('div', { key: 'ro:' + object.path, style: styles.itemReadonly, title: object.path }, [
-            e('span', { key: 'kind', style: styles.kindTag }, object.isDir ? '目录' : '文件'),
-            e('span', { key: 'path', style: styles.pathText }, object.path),
-            ...object.missing.map((item) => e('span', {
-              key: 'm:' + item, style: styles.badge, title: ITEM_HINT[item] || item,
-            }, item)),
-          ])
-          : buildItemRow(e, object, selectedSet, busy, handlers.toggle));
+    const renderNode = (node, depth) => {
+      if (!node) return null;
+      const leaf = !!node.object;
+      const state = treeCheckState(node, selectedSet);
+      const open = model.treeOpen ? model.treeOpen[node.path] !== false : true;
+      const rowChildren = [
+        node.children.length
+          ? e('button', {
+            key: 'caret',
+            type: 'button',
+            style: styles.caret,
+            title: open ? '收起' : '展开',
+            onClick: () => { if (typeof handlers.toggleExpand === 'function') handlers.toggleExpand(node.path); },
+          }, open ? '▾' : '▸')
+          : e('span', { key: 'caret', style: styles.caretSpacer }, ' '),
+        e('label', { key: 'label', style: styles.item }, [
+          e('input', {
+            key: 'cb',
+            type: 'checkbox',
+            checked: state === 'on',
+            disabled: !!busy,
+            onChange: () => {
+              if (leaf) handlers.toggle(node.path);
+              else if (typeof handlers.toggleNode === 'function') handlers.toggleNode(node);
+            },
+          }),
+          state === 'partial'
+            ? e('span', { key: 'partial', style: styles.partialMark, title: '部分选中' }, '◐')
+            : null,
+          e('span', { key: 'kind', style: styles.kindTag }, node.isDir ? '目录' : '文件'),
+          e('span', { key: 'name', style: styles.pathText, title: node.path }, node.name),
+          ...(leaf ? node.object.missing.map((item) => e('span', {
+            key: 'm:' + item, style: styles.badge, title: ITEM_HINT[item] || item,
+          }, item)) : []),
+        ]),
+      ];
+      const childRows = [];
+      if (open) {
+        for (const child of node.children) {
+          const row = renderNode(child, depth + 1);
+          if (row) childRows.push(row);
+        }
       }
+      return e('div', { key: 'n:' + node.path, style: { marginLeft: depth * 14 } }, [
+        e('div', { key: 'row', style: styles.treeRow }, rowChildren),
+        ...childRows,
+      ]);
+    };
+    const treeRows = [];
+    for (const child of tree.children) {
+      const row = renderNode(child, 0);
+      if (row) treeRows.push(row);
     }
-    selectChildren.push(e('div', { key: 'list', style: styles.list }, listChildren));
+    selectChildren.push(e('div', { key: 'tree', style: styles.list }, treeRows));
     children.push(e('div', { key: 'selectCard', style: styles.card }, selectChildren));
   } else {
     children.push(e('div', { key: 'emptyCard', style: styles.card }, [
@@ -920,6 +1035,8 @@ export function createClientPlugin({ React, ctx, log }) {
     const wsSnapshot = typeof useWorkspaces === 'function' ? useWorkspaces((snapshot) => snapshot) : null;
     // 管理工作区：草稿为 null 时按"已保存的配置"显示。
     const [wsEdit, setWsEdit] = R.useState({ open: false, draft: null, saving: false, text: '' });
+    // 目录树的展开状态（路径 → 是否展开；未记录 = 展开）。
+    const [treeOpen, setTreeOpen] = R.useState({});
     // 多工作区汇总（宿主写、每个工作区都有一份）。
     const [aggregate, setAggregate] = R.useState(null);
     const [view, setView] = R.useState({
@@ -1247,6 +1364,19 @@ export function createClientPlugin({ React, ctx, log }) {
       },
       toggle: togglePick,
       fix: () => { void submitFix(); },
+      toggleNode: (node) => {
+        if (busy) return;
+        setPicks((prev) => {
+          const current = Array.isArray(prev && prev.selected) ? prev.selected : [];
+          return { selected: toggleTreeSelection(node, new Set(current)), known: (prev && prev.known) || [] };
+        });
+      },
+      toggleExpand: (path) => {
+        setTreeOpen((prev) => {
+          const map = prev && typeof prev === 'object' ? prev : {};
+          return { ...map, [path]: map[path] === false };
+        });
+      },
       openWorkspaces,
       toggleWorkspace,
       closeWorkspaces: () => { if (!wsEdit.saving) void closeWorkspaces(); },
@@ -1275,7 +1405,8 @@ export function createClientPlugin({ React, ctx, log }) {
       diagLines,
       currentWorkspace,
       aggregate: aggregate || null,
-      aggregateGroups: aggregateObjectGroups(aggregate, currentWorkspace),
+      tree: buildObjectTree(currentWorkspace, objects),
+      treeOpen,
       workspaces: {
         paths: wsPaths,
         draft: wsDraft,

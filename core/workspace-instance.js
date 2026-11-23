@@ -207,23 +207,14 @@ export function applyChild(ctx, rawConfig, deps = {}) {
               written: !!result.value.written,
               reportPath: result.value.reportPath || '',
             });
-            // 汇总（多工作区展示用）：状态 + 计数 + 时间 + 失败/根归宿主的说明 + 缺项明细。
-            let objects = [];
-            try {
-              const rep = readReport();
-              if (rep && rep.ok === true) {
-                objects = missingObjectsOf(rep.value)
-                  .slice(0, 2000)
-                  .map((obj) => ({ path: obj.path, items: obj.items, isDir: !!obj.isDir }));
-              }
-            } catch { objects = []; }
+            // 汇总（多工作区展示用）：只放摘要（状态 + 计数 + 时间 + 失败/根归宿主的说明）。
+            // 明细不塞这里——文件会被撑爆；面板只从"当前工作区自己的 report"读明细。
             reportWorkspaceScan({
               root: rootNow(),
               status: result.value.status || 'unknown',
               counts: result.value.counts || {},
               scannedAt: new Date(now()).toISOString(),
               source,
-              objects,
               reason: Array.isArray(result.value.rootMissing) && result.value.rootMissing.length
                 ? '根上没有物化三项（属于宿主，本插件不动手）'
                 : '',

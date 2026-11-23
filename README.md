@@ -82,7 +82,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<包目录>\scripts\dsh-ven
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `workspaceRoot` | `''` | 留空 = 由平台工作区表决定（只有一个就用；多个用第一个） |
-| `workspaces` | `[]` | 多项 = 每项一个 child fiber；`path` 必须绝对路径，重复即拒绝 |
+| `workspaces` | `[]` | **空 = 管平台全部工作区**（新出现的自然在内）；非空 = 只管理列出的这些（每项 `{path}`，绝对路径）。面板「管理工作区」写它 |
 | `reportPath` | `review/veneer-state.json` | 报告写在工作区里的相对路径 |
 | `listLimit` | `50000` | 一次最多列多少对象（超了报告 `partial`） |
 | `scanTimeoutMs` | `60000` | 单次读 ACL 的超时 |

@@ -5,13 +5,10 @@
 //   · 本文件按范围规划，用 `ctx.plugin(workspacePlugin, childConfig)` 为每个工作区挂一个
 //     **child fiber**。
 //
-// 工作区范围（R-13，v2）——按优先级：
-//   ① `workspaces` 非空 → 只挂这些（现有行为）；
-//   ② 否则 `workspaceRoot` 非空 → 单实例（现有行为）；
-//   ③ 否则等工作区表 + 配置编辑器就绪（`ctx.inject`），用平台工作区表 ∩ 纳入策略：
-//        · 去掉 `exclude`；
-//        · `include` 非空 → 只留命中的（**include 为空才算"自动纳入新工作区"**）；
-//        · `autoIncludeNew=false` 且 `include` 为空 → 什么都不挂（日志说明）。
+// 工作区范围（R-13，v2；2026-11-23 简化为**一个字段**）：
+//   ① `workspaces` 非空 → 只挂列出来的这些（面板「管理工作区」写它）；
+//   ② `workspaces` 为空 → 管**平台工作区表里的全部**（新出现的自然在内）；
+//   ③ 平台表读不到时退回 `workspaceRoot`（内部/兜底，不做用户配置项）。
 //
 // 为什么不是多行 profile：同一个包出现在多个 active Loader 行会被 client-modules 拒绝
 //   （dsh-milieu 实测）；多实例只能在**一个 Loader 行内**做。
@@ -64,64 +61,6 @@ function packageDirOfCtx(ctx) {
 /** 比较用的路径键：斜杠归一 + 去尾斜杠 + 小写（与 `core/plan.js` 的 `samePath` 同一口径）。 */
 export function pathKeyOf(value) {
   return String(value == null ? '' : value).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-}
-
-/** 配置里的字符串数组归一：只留非空字符串（去首尾空白；不改写用户写的路径）。 */
-export function pathListOf(value) {
-  if (!Array.isArray(value)) return [];
-  const out = [];
-  for (const item of value) {
-    if (typeof item !== 'string') continue;
-    const text = item.trim();
-    if (text) out.push(text);
-  }
-  return out;
-}
-
-/**
- * 平台工作区表 ∩ 纳入策略（纯函数；R-13 的唯一判据）。
- *
- * @param {object} input
- *   · `platformPaths` 平台工作区表（有序；可能含重复/非法项）
- *   · `include` / `exclude` 配置的字符串数组
- *   · `autoIncludeNew` 新工作区自动纳入（仅在 `include` 为空时有意义）
- * @returns {{managed:string[], skipped:Array<{path:string, reason:string}>}}
- *   `skipped[].reason`：`excluded` / `not-included` / `auto-include-off` / `duplicate`
- */
-export function selectScope(input = {}) {
-  const platformPaths = pathListOf(input.platformPaths);
-  const include = pathListOf(input.include);
-  const exclude = pathListOf(input.exclude);
-  const includeKeys = new Set(include.map(pathKeyOf));
-  const excludeKeys = new Set(exclude.map(pathKeyOf));
-  const autoIncludeNew = input.autoIncludeNew !== false;
-  const managed = [];
-  const skipped = [];
-  const seen = new Set();
-  for (const rawPath of platformPaths) {
-    const key = pathKeyOf(rawPath);
-    if (!key) continue;
-    if (seen.has(key)) {
-      skipped.push({ path: rawPath, reason: 'duplicate' });
-      continue;
-    }
-    seen.add(key);
-    if (excludeKeys.has(key)) {
-      skipped.push({ path: rawPath, reason: 'excluded' });
-      continue;
-    }
-    if (includeKeys.size > 0) {
-      if (includeKeys.has(key)) managed.push(rawPath);
-      else skipped.push({ path: rawPath, reason: 'not-included' });
-      continue;
-    }
-    if (!autoIncludeNew) {
-      skipped.push({ path: rawPath, reason: 'auto-include-off' });
-      continue;
-    }
-    managed.push(rawPath);
-  }
-  return { managed, skipped };
 }
 
 /**
@@ -215,13 +154,11 @@ export function apply(ctx, config) {
   };
 
   // ------------------------------------------------------------------
-  // ① / ②：显式配置（workspaces 优先，其次 workspaceRoot）
+  // ① 显式列表（面板「管理工作区」写 `workspaces`）
   // ------------------------------------------------------------------
-  const workspacesGiven = raw.workspaces !== undefined && raw.workspaces !== null
-    && !(Array.isArray(raw.workspaces) && raw.workspaces.length === 0);
-  const rootGiven = typeof raw.workspaceRoot === 'string' && raw.workspaceRoot.trim() !== '';
+  const workspacesGiven = Array.isArray(raw.workspaces) && raw.workspaces.length > 0;
 
-  if (workspacesGiven || rootGiven) {
+  if (workspacesGiven) {
     const plan = planWorkspaces(raw);
     if (!plan.ok) {
       log.warn('工作区配置无效，本次不挂载任何实例：' + plan.errors.join('；'));
@@ -233,43 +170,48 @@ export function apply(ctx, config) {
     mountAll(plan.children);
   } else {
     // ------------------------------------------------------------------
-    // ③ 平台工作区表 ∩ 纳入策略（R-13）
+    // ② 空列表 = 平台工作区表里的全部；读不到表时退回 workspaceRoot
     // ------------------------------------------------------------------
     const host = createDsh(ctx, packageDir);
     if (!host.canInject()) {
-      log.warn('既没有 workspaces/workspaceRoot，宿主也没有 ctx.inject —— 拿不到平台工作区表，本次不挂实例');
-      log.event('host.plan', '规划完成：要挂 0 个实例（无工作区来源）', { children: 0 });
+      if (cfg.workspaceRoot) {
+        log.info('宿主没有 ctx.inject：退回 workspaceRoot 单实例（' + cfg.workspaceRoot + '）');
+        mountAll([{ path: cfg.workspaceRoot, config: childConfigFor(raw, cfg.workspaceRoot) }]);
+      } else {
+        log.warn('宿主没有 ctx.inject，也没有 workspaceRoot：拿不到工作区，本次不挂实例');
+        log.event('host.plan', '规划完成：要挂 0 个实例（无工作区来源）', { children: 0 });
+      }
     } else {
       scopeFiber = guardSync('等工作区范围服务', () => host.awaitScope((scope) => {
         if (disposed || scopeMounted) return;
         scopeMounted = true;
         const listed = scope.dsh && scope.dsh.workspace ? scope.dsh.workspace.listPaths() : null;
-        if (!listed || listed.ok !== true) {
-          log.warn('读平台工作区表失败，本次不挂实例：' + String((listed && listed.reason) || '宿主没有工作区表'));
-          log.event('host.plan', '规划完成：要挂 0 个实例（工作区表不可用）', { children: 0 });
-          return;
-        }
-        const selection = selectScope({
-          platformPaths: listed.value,
-          include: cfg.include,
-          exclude: cfg.exclude,
-          autoIncludeNew: cfg.autoIncludeNew,
-        });
-        for (const skipped of selection.skipped) {
-          if (skipped.reason === 'duplicate') continue; // 平台表重复不必刷屏
-          log.info('工作区不纳入（' + skipped.reason + '）：' + skipped.path);
-        }
-        if (selection.managed.length === 0) {
-          if (!pathListOf(cfg.include).length && cfg.autoIncludeNew === false) {
-            log.warn('autoIncludeNew=false 且 include 为空：平台工作区全都不纳入（要管哪个就写进 include 或 workspaceRoot）');
-          } else {
-            log.warn('平台工作区表按纳入策略过滤后为空：本次不挂实例');
+        const paths = [];
+        if (listed && listed.ok === true && Array.isArray(listed.value)) {
+          const seen = new Set();
+          for (const item of listed.value) {
+            if (typeof item !== 'string') continue;
+            const text = item.trim();
+            const key = pathKeyOf(text);
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            paths.push(text);
           }
         }
-        const entries = selection.managed.map((path) => ({ path, config: childConfigFor(raw, path) }));
+        if (!paths.length) {
+          if (cfg.workspaceRoot) {
+            log.info('读不到平台工作区表：退回 workspaceRoot 单实例（' + cfg.workspaceRoot + '）');
+            mountAll([{ path: cfg.workspaceRoot, config: childConfigFor(raw, cfg.workspaceRoot) }]);
+          } else {
+            log.warn('读不到平台工作区表，也没有 workspaceRoot：本次不挂实例');
+            log.event('host.plan', '规划完成：要挂 0 个实例（工作区表不可用）', { children: 0 });
+          }
+          return;
+        }
+        const entries = paths.map((path) => ({ path, config: childConfigFor(raw, path) }));
         log.event('host.plan', '规划完成：要挂 ' + entries.length + ' 个实例', { children: entries.length });
-        log.info('规划完成（平台工作区表 ∩ 纳入策略）：要挂 ' + entries.length + ' 个实例（'
-          + (entries.map((entry) => entry.path).join(' / ') || '无') + '）');
+        log.info('规划完成（管理全部工作区）：要挂 ' + entries.length + ' 个实例（'
+          + entries.map((entry) => entry.path).join(' / ') + '）');
         mountAll(entries);
       }), {
         log,

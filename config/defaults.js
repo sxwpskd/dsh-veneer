@@ -9,9 +9,11 @@
 import { REPORT_REL_PATH } from '../model/acl.js';
 
 export const DEFAULT_CONFIG = {
-  // 工作区根。空 = 由平台 / `workspaces` 决定。
+  // 工作区根。**内部用**：child 实例的固定根；平台工作区表读不到时作兜底。
+  // 面向用户的配置只有 `workspaces`（面板「管理工作区」写它）。
   workspaceRoot: '',
-  // 多工作区：每项 `{ path }` 挂一个 child fiber；空数组 = 单工作区兼容。
+  // 要管的工作区：**空数组 = 管平台上的全部工作区**（新出现的自然在内）；
+  // 非空 = 只列出来的这些（每项 `{ path }`）。
   workspaces: [],
   // 报告写在**工作区里**的相对路径（相对根）。**不要写进 dsh-milieu 的状态文件**。
   reportPath: REPORT_REL_PATH,
@@ -27,14 +29,6 @@ export const DEFAULT_CONFIG = {
   bridge: true,
   // 桥轮询请求文件的间隔（毫秒）；有文件监视时它只是兜底。
   bridgePollMs: 1000,
-
-  // ---- v2 · 工作区范围（R-13） ----
-  // 新出现的工作区自动纳入（`include` 为空时由它决定"全要"还是"不要"）。
-  autoIncludeNew: true,
-  // 白名单：非空时只管理这些工作区（归一化后比较）。
-  include: [],
-  // 黑名单：优先于 `autoIncludeNew`；弹窗选"不再检查"就是把路径加到这里。
-  exclude: [],
 
   // ---- v2 · 会话检查（R-12） ----
   // 会话首条人类消息触发一次异步扫描。

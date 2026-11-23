@@ -2,14 +2,18 @@
 //
 // 用途只有两件（都在"不再检查本工作区"这条路上）：
 //   · `entries()`     找到**本插件自己的 Loader 行**（`entry.id === 'include:veneer'`）；
-//   · `editExclude()` 把工作区路径加进该行配置的 `exclude`（下一轮 Loader 重规划时它就不在范围里）。
+//   · `editWorkspacesRemove()` 把工作区从该行配置的 `workspaces` 里去掉（下一轮 Loader 重规划时它就不在范围里）。
+//
+// `workspaces` 的约定（2026-11-23 简化后）：**空数组 = 管理平台全部工作区**，非空 = 只这些。
+// 所以"去掉一个"有两种写法：列表非空 → 直接过滤；列表为空（全管）→ 用平台表展开后去掉它。
+// 只剩一个工作区时无法用空列表表达"不检查"，这种情况如实拒绝，不写坏配置。
 //
 // 为什么不是"直接写 profile 文件"：`configEditor.edit(entry, change)` 是官方接口
 //   —— 它在应用文件锁/重载队列里校验并落盘，Loader 会按正常生命周期重挂插件行。
 //   自己改 YAML 会绕开校验，还可能覆盖并发的其它改动。
 //
 // 异常边界：**不抛**。宿主没有 `configEditor`、找不到行、或 `edit` 失败 → `{ok:false, reason}`。
-// 纪律与 `adapter/dsh.js` 相同：这里只翻译，不决定"该不该排除"（那是核心层/用户的决定）。
+// 纪律与 `adapter/dsh.js` 相同：这里只翻译，不决定"该不该移除"（那是核心层/用户的决定）。
 const SERVICE = {
   configEditor: 'configEditor',
 };
@@ -19,6 +23,11 @@ const SERVICE = {
  * 由 `cordis.patch.yml` 的 `- insert: - id: veneer` 经 Include 层展开而来（2026-11-23 集成方确认）。
  */
 export const ENTRY_ID = 'include:veneer';
+
+/** 路径比较键：斜杠归一 + 去尾斜杠 + 小写。 */
+function pathKeyOf(value) {
+  return String(value == null ? '' : value).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
 
 /** 取服务：只做属性访问（真 ctx 是代理，没声明就访问会抛 → 翻译成"没有"）。 */
 function service(ctx, name) {
@@ -54,7 +63,7 @@ function findOwnEntry(rows) {
  * 造一份配置编辑能力。
  *
  * @param {object} ctx **注入了 `configEditor` 的 ctx**（实例里来自 `host.awaitConfigEditor`）
- * @returns {{entries:Function, editExclude:Function}}
+ * @returns {{entries:Function, editWorkspacesRemove:Function}}
  */
 export function createConfigEditor(ctx) {
   /** 本插件行的 entry；找不到/接口没有 → `{ok:false}`。 */
@@ -87,17 +96,18 @@ export function createConfigEditor(ctx) {
     },
 
     /**
-     * 把工作区路径加进本行配置的 `exclude`（幂等：已在里面就不重复）。
+     * 把工作区从本行配置的 `workspaces` 里去掉（幂等）。
      *
      * 用 `configEditor.edit(entry, change)`：`change(current)` 收到**原始配置**，返回完整的新配置；
      * 官方负责校验、落盘并让 Loader 重规划（child fiber 的增删交给 Loader）。
      *
-     * @param {string} addPath 工作区路径（调用方已归一/校验过是本实例 root）
-     * @returns {Promise<{ok:true, value:{entry:object, exclude:string[]}}|{ok:false, reason:string}>}
+     * @param {string} removePath 工作区路径（调用方已校验是本实例 root）
+     * @param {string[]} [platformPaths] 平台工作区表（列表为空=全管时需要它来展开）
+     * @returns {Promise<{ok:true, value:{entry:object, workspaces:Array}}|{ok:false, reason:string}>}
      */
-    async editExclude(addPath) {
-      const path = typeof addPath === 'string' ? addPath.trim() : '';
-      if (!path) return { ok: false, reason: '要排除的工作区路径是空的' };
+    async editWorkspacesRemove(removePath, platformPaths) {
+      const path = typeof removePath === 'string' ? removePath.trim() : '';
+      if (!path) return { ok: false, reason: '要去掉的工作区路径是空的' };
       const found = findEntry();
       if (found.ok !== true) return found;
       const entry = found.value;
@@ -105,16 +115,36 @@ export function createConfigEditor(ctx) {
       if (!editor || typeof editor.edit !== 'function') {
         return { ok: false, reason: '宿主 ' + SERVICE.configEditor + ' 没有 edit()（改不了配置）' };
       }
+      const key = pathKeyOf(path);
+      let next = null;
       try {
         await editor.edit(entry, (current) => {
           const base = current && typeof current === 'object' && !Array.isArray(current) ? current : {};
-          const existing = Array.isArray(base.exclude) ? base.exclude.filter((item) => typeof item === 'string') : [];
-          return { ...base, exclude: [...new Set([...existing, path])] };
+          const list = Array.isArray(base.workspaces)
+            ? base.workspaces.filter((item) => item && typeof item.path === 'string' && item.path.trim())
+            : [];
+          let kept;
+          if (list.length > 0) {
+            kept = list.filter((item) => pathKeyOf(item.path) !== key);
+          } else {
+            const platform = Array.isArray(platformPaths) ? platformPaths : [];
+            kept = platform
+              .filter((item) => typeof item === 'string' && pathKeyOf(item) !== key)
+              .map((item) => ({ path: item }));
+            if (platform.length === 0) {
+              throw new Error('列表为空（=全管）且拿不到平台工作区表，无法把本工作区摘出去');
+            }
+          }
+          if (kept.length === 0) {
+            throw new Error('摘掉后管理工作区为空：空列表表示"全管"，无法表达"不检查"（至少要留一个，或停用本插件行）');
+          }
+          next = kept;
+          return { ...base, workspaces: kept };
         });
       } catch (err) {
         return { ok: false, reason: '写配置失败（' + path + '）：' + reasonOf(err) };
       }
-      return { ok: true, value: { entry, exclude: [path] } };
+      return { ok: true, value: { entry, workspaces: next || [] } };
     },
   };
 }

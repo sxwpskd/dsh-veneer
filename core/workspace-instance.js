@@ -329,11 +329,11 @@ export function applyChild(ctx, rawConfig, deps = {}) {
   };
 
   // ------------------------------------------------------------------
-  // "不再检查本工作区"：把 root 写进本插件 Loader 行的 exclude（改配置，不存私有状态位）
+  // "不再检查本工作区"：把它从本插件 Loader 行的 `workspaces` 里摘掉（改配置，不存私有状态位）
   // ------------------------------------------------------------------
   /** 等 `configEditor` 就绪后造配置编辑能力（超时 → 失败，不吊死事件回调）。 */
   const configEditorOf = () => new Promise((resolve) => {
-    if (deps.configEditor && typeof deps.configEditor.editExclude === 'function') {
+    if (deps.configEditor && typeof deps.configEditor.editWorkspacesRemove === 'function') {
       resolve({ ok: true, value: deps.configEditor });
       return;
     }
@@ -367,21 +367,29 @@ export function applyChild(ctx, rawConfig, deps = {}) {
     }, { log, blockedBy: 'host', code: CODES.HOST_CALL_FAILED });
   });
 
-  /** 把本工作区加进 exclude（失败只 warn，不抛）。 */
+  /** 从管理列表里摘掉本工作区（失败只 warn，不抛）。 */
   const markWorkspaceIgnored = async () => {
     const root = rootNow();
     if (!root) return { ok: false, reason: '工作区根还没解析出来' };
     const editor = await configEditorOf();
     if (editor.ok !== true) {
-      log.warn('加入 exclude 失败（只报告）：' + editor.reason);
+      log.warn('摘除管理失败（只报告）：' + editor.reason);
       return editor;
     }
-    const result = await editor.value.editExclude(root);
-    if (!result || result.ok !== true) {
-      log.warn('加入 exclude 失败（只报告）：' + String((result && result.reason) || '未知原因'));
-      return result && result.ok === false ? result : { ok: false, reason: '加入 exclude 失败' };
+    // 列表为空 = "全管"时，需要平台表才能展开成"全部减去本工作区"。
+    let platformPaths = [];
+    try {
+      const listed = typeof host.workspace.listPaths === 'function' ? host.workspace.listPaths() : null;
+      if (listed && listed.ok === true && Array.isArray(listed.value)) platformPaths = listed.value;
+    } catch {
+      platformPaths = [];
     }
-    log.info('已把工作区加入 exclude（以后不再主动检查它）：' + root);
+    const result = await editor.value.editWorkspacesRemove(root, platformPaths);
+    if (!result || result.ok !== true) {
+      log.warn('摘除管理失败（只报告）：' + String((result && result.reason) || '未知原因'));
+      return result && result.ok === false ? result : { ok: false, reason: '摘除管理失败' };
+    }
+    log.info('已把工作区从管理列表移除（以后不再主动检查它）：' + root);
     return result;
   };
 

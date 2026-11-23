@@ -9,10 +9,8 @@
     - id: veneer
       name: dsh-veneer
       config:
-        # 工作区根。空 = 由 `workspaces` 决定；`workspaces` 也为空时挂一个默认实例，
-        # 根在本轮第一次成功执行扫描时才解析（解析不到就只报告，不写任何文件）。
-        workspaceRoot: ''
-        # 多工作区：每项 `{ path }` 挂一个 child fiber；path 必须是绝对路径，重复直接拒绝。
+        # 要管的工作区：空 = 平台上的全部（新出现的自然在内）；非空 = 只这些。
+        # 面板「管理工作区」勾选后写这里（全勾 = 写空列表）。
         workspaces: []
         # 报告写到工作区里的相对路径（相对工作区根）。**不要放进 dsh-milieu 的状态文件**。
         reportPath: review/veneer-state.json
@@ -28,14 +26,6 @@
         bridge: true
         # 桥轮询间隔（毫秒）；有文件监视时只是兜底。
         bridgePollMs: 1000
-
-        # ---- v2 · 工作区范围（R-13） ----
-        # 新出现的工作区自动纳入（`include` 为空时由它决定"全要"还是"不要"）。
-        autoIncludeNew: true
-        # 白名单：非空时只管理这些工作区。
-        include: []
-        # 黑名单：优先于 autoIncludeNew；原生弹窗选"不再检查"会追加到这里。
-        exclude: []
 
         # ---- v2 · 会话检查（R-12） ----
         # 会话首条人类用户消息触发一次异步扫描。

@@ -29,9 +29,10 @@ const workspaceItem = Schema.object({
  * 避免多个配置实例共享同一个数组。
  */
 export const Config = Schema.object({
-  // ---- 工作区 ----
-  workspaceRoot: Schema.string().default(DEFAULT_CONFIG.workspaceRoot),
+  // ---- 工作区（面向用户只有 workspaces：空 = 平台全部，非空 = 只这些） ----
   workspaces: Schema.array(workspaceItem).default([]),
+  // 内部/兜底：child 实例的固定根；平台工作区表读不到时用它。
+  workspaceRoot: Schema.string().default(DEFAULT_CONFIG.workspaceRoot),
   // ---- 报告 ----
   reportPath: Schema.string().default(DEFAULT_CONFIG.reportPath),
   listLimit: Schema.number().default(DEFAULT_CONFIG.listLimit),
@@ -41,10 +42,6 @@ export const Config = Schema.object({
   scanOnMount: Schema.boolean().default(DEFAULT_CONFIG.scanOnMount),
   bridge: Schema.boolean().default(DEFAULT_CONFIG.bridge),
   bridgePollMs: Schema.number().default(DEFAULT_CONFIG.bridgePollMs),
-  // ---- v2 · 工作区范围（R-13） ----
-  autoIncludeNew: Schema.boolean().default(DEFAULT_CONFIG.autoIncludeNew),
-  include: Schema.array(Schema.string()).default([...DEFAULT_CONFIG.include]),
-  exclude: Schema.array(Schema.string()).default([...DEFAULT_CONFIG.exclude]),
   // ---- v2 · 会话检查（R-12） ----
   sessionCheck: Schema.boolean().default(DEFAULT_CONFIG.sessionCheck),
   autoPrompt: Schema.boolean().default(DEFAULT_CONFIG.autoPrompt),

@@ -8,12 +8,12 @@ at that moment, so the host asks with a Windows Forms MessageBox.
 Why TWO dialogs instead of one Yes/No/Cancel box (2026-11-23, ERRATA E-013):
 a MessageBox returns `Cancel` both for its Cancel button and for the window's X,
 so the user closing the box by habit would be read as "stop checking this
-workspace" and silently add the workspace to `exclude`. Two plain Yes/No boxes
+workspace" and silently remove the workspace from the managed list. Two plain Yes/No boxes
 make the destructive choice explicit, and closing a box always means "later":
 
   box 1: fix now?     Yes -> 6  (the host starts the UAC-elevated apply run)
                       No / X -> continue to box 2
-  box 2: auto-check this workspace later?  Yes -> 8 (host writes it into exclude)
+  box 2: auto-check this workspace later?  Yes -> 8 (host removes it from management)
                                           No / X -> 7 (ask later)
 
 Any other exit code means failure (1 = the dialog could not be shown).
@@ -50,7 +50,7 @@ try {
         $body2 = 'Keep automatically checking this workspace later?' + "`r`n`r`n" `
             + 'Workspace: ' + $root + "`r`n" `
             + 'Missing objects: ' + $missing + "`r`n`r`n" `
-            + 'Yes = stop checking this workspace (added to exclude).' + "`r`n" `
+            + 'Yes = stop checking this workspace (removed from the managed list).' + "`r`n" `
             + 'No / close = keep checking, handle it later.'
     }
 

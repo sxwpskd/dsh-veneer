@@ -20,7 +20,9 @@ import { createFs } from '../adapter/fs.js';
 import { createDsh, WORKSPACE_DEPENDENCIES } from '../adapter/dsh.js';
 import { createConfigEditor } from '../adapter/config.js';
 import { revealInExplorer, resolveInsideRoot } from '../adapter/desktop.js';
-import { attachBootstrapLog, attachWorkspaceLog, sharedLog } from '../log/shared.js';
+import { attachBootstrapLog, dedupeSink } from '../log/shared.js';
+import { createLog } from '../log/logger.js';
+import { createFileSink } from '../log/file-sink.js';
 import { withDefaults } from '../config/defaults.js';
 import { packageDirOf, scriptPathOf, INSPECT_SCRIPT } from '../core/command-path.js';
 import { scanOnce, resolveRoot as resolveRootOf } from '../core/scan-once.js';
@@ -75,8 +77,29 @@ export function sessionCwdOf(session) {
 /** 一个工作区实例的装配（供 `workspacePlugin.apply` 调用；离线测试直接调它）。 */
 export function applyChild(ctx, rawConfig, deps = {}) {
   const cfg = withDefaults(rawConfig);
-  const log = sharedLog((() => { try { return ctx && ctx.logger; } catch { return null; } })());
+  // **每个实例一个日志口**（2026-11-23，0.4.5）：以前共用进程级单例 + 单一文件 sink，
+  // 多工作区共存时每个实例 `attachFileSink` 都会把 sink 换成自己的 → 事件全写到"最后挂的那个
+  // 工作区"的日志里。现在各写各的：`<本工作区>/.dsh-veneer/veneer.log`。
+  const log = createLog((() => { try { return ctx && ctx.logger; } catch { return null; } })(), {});
   const fs = deps.fs || createFs();
+
+  /** 本实例自己的文件日志（只写本工作区；重复挂同一路径由 logger 自己短路）。 */
+  const attachOwnWorkspaceLog = (root) => {
+    const base = String(root || '');
+    if (!base) return false;
+    try {
+      const sink = createFileSink({
+        fs,
+        dir: joinPath(base, '.dsh-veneer'),
+        onFailure: (reason) => {
+          try { log.warn('日志文件写不进去（' + base + '）：' + reason); } catch { /* 报告失败就算了 */ }
+        },
+      });
+      return log.attachFileSink(dedupeSink(sink));
+    } catch {
+      return false;
+    }
+  };
   const scanOnceImpl = typeof deps.scanOnceImpl === 'function' ? deps.scanOnceImpl : scanOnce;
   const runFixImpl = typeof deps.runFixImpl === 'function' ? deps.runFixImpl : runFix;
   const askFixImpl = typeof deps.askFixImpl === 'function' ? deps.askFixImpl : askFix;
@@ -491,7 +514,7 @@ export function applyChild(ctx, rawConfig, deps = {}) {
       return;
     }
     // 根已经知道：日志从现在起写进工作区（内存里之前的事件会补写过去）。
-    attachWorkspaceLog(log, fs, resolved.value);
+    attachOwnWorkspaceLog(resolved.value);
     bridge = createBridge({
       fs,
       root: resolved.value,
@@ -536,7 +559,7 @@ export function applyChild(ctx, rawConfig, deps = {}) {
           if (resolved.ok) {
             currentRoot = resolved.value;
             ensureFixRegistration();
-            attachWorkspaceLog(log, fs, resolved.value);
+            attachOwnWorkspaceLog(resolved.value);
           }
           log.event('host.inject.ready', '注入回调已触发（工作区服务就绪）', {});
           if (cfg.scanOnMount) enqueueScan(child, 'inject');

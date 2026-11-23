@@ -15,13 +15,17 @@ import { execFile } from 'node:child_process';
 
 const SERVICE = {
   workspace: 'workspaceRegistry',
+  configEditor: 'configEditor',
 };
 
 /** "等工作区服务就绪"的依赖清单（`ctx.inject` 入参，同样只在这里出现）。 */
 export const WORKSPACE_DEPENDENCIES = ['workspaceRegistry'];
 
-/** "等工作区表就绪"（范围规划用；0.4.6 起不再需要 configEditor）。 */
+/** "等工作区表就绪"（范围规划用）。 */
 export const SCOPE_DEPENDENCIES = ['workspaceRegistry'];
+
+/** 只等配置编辑器（弹窗里勾了"以后不再检查本工作区"才改配置）。 */
+export const CONFIG_DEPENDENCIES = ['configEditor'];
 
 /** 取一个服务：只做属性访问（真 ctx 是代理，没声明就访问会抛 → 翻译成"没有"）。 */
 function service(ctx, name) {
@@ -165,6 +169,15 @@ export function createDsh(ctx, packageDir = '') {
      */
     awaitScope(callback) {
       return ctx.inject(SCOPE_DEPENDENCIES, (sub) => callback({ dsh: createDsh(sub, packageDir), ctx: sub }));
+    },
+
+    /**
+     * 只等配置编辑器就绪（弹窗里勾了"以后不再检查本工作区"时才改配置）。
+     * 回调拿到**子 ctx 原样**（`adapter/config.js` 从它上面读 `configEditor`）。
+     * @returns {object|null} 框架给的 fiber（可 dispose）
+     */
+    awaitConfigEditor(callback) {
+      return ctx.inject(CONFIG_DEPENDENCIES, (sub) => callback(sub));
     },
 
     /**

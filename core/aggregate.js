@@ -55,6 +55,17 @@ export function reportWorkspaceScan(entry) {
     const key = keyOf(root);
     const previous = entries.get(key) || null;
     const counts = value.counts && typeof value.counts === 'object' ? value.counts : {};
+    const objects = [];
+    if (Array.isArray(value.objects)) {
+      for (const item of value.objects.slice(0, 2000)) {
+        if (!item || typeof item.path !== 'string' || !item.path) continue;
+        objects.push({
+          path: item.path,
+          items: (Array.isArray(item.items) ? item.items : []).filter((name) => typeof name === 'string'),
+          isDir: !!item.isDir,
+        });
+      }
+    }
     const next = {
       root: previous ? previous.root : root,
       status: typeof value.status === 'string' && value.status ? value.status : 'unknown',
@@ -64,6 +75,7 @@ export function reportWorkspaceScan(entry) {
         skipped: Number(counts.skipped) || 0,
         failed: Number(counts.failed) || 0,
       },
+      objects,
       scannedAt: typeof value.scannedAt === 'string' && value.scannedAt ? value.scannedAt : '',
       reason: typeof value.reason === 'string' ? value.reason : '',
       source: typeof value.source === 'string' ? value.source : '',
@@ -92,7 +104,13 @@ export function forgetWorkspace(root) {
 /** 当前汇总（按首次出现顺序；返回副本）。 */
 export function snapshotWorkspaces() {
   const out = [];
-  for (const item of entries.values()) out.push({ ...item, counts: { ...item.counts } });
+  for (const item of entries.values()) {
+    out.push({
+      ...item,
+      counts: { ...item.counts },
+      objects: item.objects.map((obj) => ({ path: obj.path, items: [...obj.items], isDir: obj.isDir })),
+    });
+  }
   return out;
 }
 

@@ -25,14 +25,30 @@ export const ASK_SCRIPT = 'scripts/dsh-veneer-ask.ps1';
 /** 等人点按钮的时限（毫秒）；超时按失败报，不假装"以后再说"。 */
 export const ASK_TIMEOUT_MS = 300000;
 
-/** 退出码 → 动作。 */
+/** 退出码 → 动作。8/9 = 同时勾了"以后不再检查本工作区"（见 `ask.ps1` 的勾选框）。 */
 export const ASK_EXIT = Object.freeze({
   FIX: 6,
   LATER: 7,
+  FIX_STOP: 8,
+  LATER_STOP: 9,
 });
 
 /** 框正文的环境变量名（脚本读它；名字一起改）。 */
 export const TEXT_ENV = 'DSH_VENEER_ASK_TEXT';
+
+/** 对话框文字（脚本必须保持纯 ASCII，所以中文由宿主经环境变量传进去）。 */
+export const TITLE_ENV = 'DSH_VENEER_ASK_TITLE';
+export const YES_ENV = 'DSH_VENEER_ASK_YES';
+export const NO_ENV = 'DSH_VENEER_ASK_NO';
+export const STOP_ENV = 'DSH_VENEER_ASK_STOP';
+
+/** 对话框上的中文标签（脚本里只有 ASCII 兜底，正常路径全走这里）。 */
+const ASK_LABELS = Object.freeze({
+  title: 'dsh-veneer',
+  yes: '是',
+  no: '否',
+  stop: '以后不再检查本工作区（从管理列表移除）',
+});
 
 /** PowerShell 参数（与 `adapter/acl.js` 的同一组；这里用 `-File` 直接跑脚本）。 */
 const PS_ARGS = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File'];
@@ -73,7 +89,8 @@ export function buildAskText(input = {}) {
   lines.push('');
   lines.push('现在修复吗？');
   lines.push('是 = 现在修复（会弹 UAC，只改这些对象缺的项）');
-  lines.push('否 / 关窗 = 以后再说（要停止检查本工作区，请到插件配置页勾选「取消后续对于本工作区的检查」）');
+  lines.push('否 / 关窗 = 以后再说');
+  lines.push('（下方的勾选框：以后不再检查本工作区）');
   return lines.join('\n');
 }
 
@@ -89,7 +106,7 @@ export function buildAskText(input = {}) {
  *   · `execImpl`   进程注入点（签名同 `adapter/dsh.runProcess` 的 runner）
  *   · `execFileImpl` 更底层注入点（签名同 `node:child_process.execFile`）
  *   · `env` / `timeoutMs` / `title`
- * @returns {Promise<{ok:true, value:'fix'|'later'}|{ok:false, reason:string, code:string}>}
+ * @returns {Promise<{ok:true, value:'fix'|'later', stopChecking:boolean}|{ok:false, reason:string, code:string}>}
  */
 export async function askFix(options = {}) {
   const root = typeof options.root === 'string' ? options.root.trim() : '';
@@ -112,6 +129,10 @@ export async function askFix(options = {}) {
     DSH_VENEER_ASK_ROOT: root,
     DSH_VENEER_ASK_MISSING: String(missing),
     [TEXT_ENV]: text,
+    [TITLE_ENV]: ASK_LABELS.title,
+    [YES_ENV]: ASK_LABELS.yes,
+    [NO_ENV]: ASK_LABELS.no,
+    [STOP_ENV]: ASK_LABELS.stop,
   };
   const timeout = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
     ? options.timeoutMs
@@ -130,9 +151,12 @@ export async function askFix(options = {}) {
   if (result.timedOut) {
     return { ok: false, reason: '确认框超时（' + timeout + ' ms）：没有人点按钮', code: 'ask-timeout' };
   }
-  // 6/7 是**业务退出码**；execFile 对非零退出会给 err，所以先看 code。
-  if (result.code === ASK_EXIT.FIX) return { ok: true, value: 'fix' };
-  if (result.code === ASK_EXIT.LATER) return { ok: true, value: 'later' };
+  // 6/7/8/9 是**业务退出码**；execFile 对非零退出会给 err，所以先看 code。
+  // 8/9 表示同时勾了"以后不再检查本工作区"。
+  if (result.code === ASK_EXIT.FIX) return { ok: true, value: 'fix', stopChecking: false };
+  if (result.code === ASK_EXIT.LATER) return { ok: true, value: 'later', stopChecking: false };
+  if (result.code === ASK_EXIT.FIX_STOP) return { ok: true, value: 'fix', stopChecking: true };
+  if (result.code === ASK_EXIT.LATER_STOP) return { ok: true, value: 'later', stopChecking: true };
   const detail = String((result.stderr || result.error || '') || '').trim();
   return {
     ok: false,

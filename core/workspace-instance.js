@@ -19,6 +19,7 @@
 import { createAclReader } from '../adapter/acl.js';
 import { createFs } from '../adapter/fs.js';
 import { createDsh, WORKSPACE_DEPENDENCIES } from '../adapter/dsh.js';
+import { createConfigEditor } from '../adapter/config.js';
 import { revealInExplorer, resolveInsideRoot } from '../adapter/desktop.js';
 import { attachBootstrapLog, dedupeSink } from '../log/shared.js';
 import { createLog } from '../log/logger.js';
@@ -45,6 +46,9 @@ const OWN_PACKAGE_DIR = packageDirOf(import.meta.url);
 /** 扫描来源词（日志里按它区分触发者）。 */
 export const SESSION_SCAN_SOURCE = 'session-first-message';
 export const POST_FIX_SCAN_SOURCE = 'after-fix';
+
+/** 等配置编辑器就绪的超时（弹窗勾了"以后不再检查"才改配置；拿不到就只 warn）。 */
+const CONFIG_EDITOR_WAIT_MS = 10000;
 
 /**
  * 这条事件是不是**人**发的首条消息？（R-12 的触发判据）
@@ -101,6 +105,7 @@ export function applyChild(ctx, rawConfig, deps = {}) {
   const scanOnceImpl = typeof deps.scanOnceImpl === 'function' ? deps.scanOnceImpl : scanOnce;
   const runFixImpl = typeof deps.runFixImpl === 'function' ? deps.runFixImpl : runFix;
   const askFixImpl = typeof deps.askFixImpl === 'function' ? deps.askFixImpl : askFix;
+  const createConfigEditorImpl = typeof deps.createConfigEditor === 'function' ? deps.createConfigEditor : createConfigEditor;
   const now = typeof deps.now === 'function' ? deps.now : () => Date.now();
   let disposed = false;
   let fallbackTimer = null;
@@ -202,13 +207,23 @@ export function applyChild(ctx, rawConfig, deps = {}) {
               written: !!result.value.written,
               reportPath: result.value.reportPath || '',
             });
-            // 汇总（多工作区展示用）：状态 + 计数 + 时间 + 失败/根归宿主的说明。
+            // 汇总（多工作区展示用）：状态 + 计数 + 时间 + 失败/根归宿主的说明 + 缺项明细。
+            let objects = [];
+            try {
+              const rep = readReport();
+              if (rep && rep.ok === true) {
+                objects = missingObjectsOf(rep.value)
+                  .slice(0, 2000)
+                  .map((obj) => ({ path: obj.path, items: obj.items, isDir: !!obj.isDir }));
+              }
+            } catch { objects = []; }
             reportWorkspaceScan({
               root: rootNow(),
               status: result.value.status || 'unknown',
               counts: result.value.counts || {},
               scannedAt: new Date(now()).toISOString(),
               source,
+              objects,
               reason: Array.isArray(result.value.rootMissing) && result.value.rootMissing.length
                 ? '根上没有物化三项（属于宿主，本插件不动手）'
                 : '',
@@ -369,10 +384,70 @@ export function applyChild(ctx, rawConfig, deps = {}) {
   };
 
   // ------------------------------------------------------------------
-  // "取消后续检查本工作区"**不在弹窗里**（2026-11-23 主人定）：它改成配置页的一个勾选项，
-  // 由用户明确勾选并保存（写 `workspaces`）。弹窗因此只问"现在修复吗？"，关窗永远只是"以后再说"，
-  // 不会再因为误关窗口改配置。宿主侧不需要 `configEditor`（本文件不再改配置）。
+  // 弹窗里的"以后不再检查本工作区"勾选框（2026-11-23 主人定：**在弹窗下方加勾选**，不是另开弹窗）
+  // 勾了就把本工作区从 Loader 行的 `workspaces` 里摘掉（改配置，不存私有状态位）；失败只 warn。
   // ------------------------------------------------------------------
+  /** 等 `configEditor` 就绪后造配置编辑能力（超时 → 失败，不吊死事件回调）。 */
+  const configEditorOf = () => new Promise((resolve) => {
+    if (deps.configEditor && typeof deps.configEditor.editWorkspacesRemove === 'function') {
+      resolve({ ok: true, value: deps.configEditor });
+      return;
+    }
+    if (!host.canInject()) {
+      resolve({ ok: false, reason: '宿主没有 ctx.inject，改不了配置' });
+      return;
+    }
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) { try { clearTimeout(timer); } catch { /* 清不掉不影响结果 */ } }
+      resolve(value);
+    };
+    let timer = null;
+    try {
+      timer = setTimeout(() => {
+        finish({ ok: false, reason: '等配置编辑器超时（' + CONFIG_EDITOR_WAIT_MS + ' ms）' });
+      }, CONFIG_EDITOR_WAIT_MS);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    } catch { timer = null; }
+    guardSync('等配置编辑器', () => {
+      host.awaitConfigEditor((sub) => {
+        try {
+          finish({ ok: true, value: createConfigEditorImpl(sub) });
+        } catch (err) {
+          finish({ ok: false, reason: '造配置编辑能力失败：' + reasonOf(err) });
+        }
+      });
+      return true;
+    }, { log, blockedBy: 'host', code: CODES.HOST_CALL_FAILED });
+  });
+
+  /** 把本工作区从管理列表里摘掉（弹窗勾选框；失败只 warn，不抛）。 */
+  const markWorkspaceIgnored = async () => {
+    const root = rootNow();
+    if (!root) return { ok: false, reason: '工作区根还没解析出来' };
+    const editor = await configEditorOf();
+    if (editor.ok !== true) {
+      log.warn('摘除管理失败（只报告）：' + editor.reason);
+      return editor;
+    }
+    // 列表为空 = "全管"时，需要平台表才能展开成"全部减去本工作区"。
+    let platformPaths = [];
+    try {
+      const listed = typeof host.workspace.listPaths === 'function' ? host.workspace.listPaths() : null;
+      if (listed && listed.ok === true && Array.isArray(listed.value)) platformPaths = listed.value;
+    } catch {
+      platformPaths = [];
+    }
+    const result = await editor.value.editWorkspacesRemove(root, platformPaths);
+    if (!result || result.ok !== true) {
+      log.warn('摘除管理失败（只报告）：' + String((result && result.reason) || '未知原因'));
+      return result && result.ok === false ? result : { ok: false, reason: '摘除管理失败' };
+    }
+    log.info('已把工作区从管理列表移除（以后不再主动检查它）：' + root);
+    return result;
+  };
 
   // ------------------------------------------------------------------
   // 会话检查（R-12）：首条"人"的消息 → 异步扫描 → （可选）原生确认框
@@ -399,6 +474,12 @@ export function applyChild(ctx, rawConfig, deps = {}) {
     if (!answer || answer.ok !== true) {
       log.warn('原生确认框没有给出答案（' + String((answer && answer.reason) || '未知原因') + '），本次不处理');
       return;
+    }
+    if (answer.stopChecking === true) {
+      // 弹窗下方勾了"以后不再检查本工作区"：先摘管理列表，再按按钮继续修/不修。
+      log.info('会话检查：用户勾选「以后不再检查本工作区」');
+      await markWorkspaceIgnored();
+      if (disposed) return;
     }
     if (answer.value === 'later') {
       log.info('会话检查：用户选择「以后再说」');

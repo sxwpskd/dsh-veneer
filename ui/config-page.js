@@ -434,6 +434,7 @@ const styles = {
   wsOption: { display: 'flex', alignItems: 'center', gap: '8px', padding: '3px 2px', fontSize: '13px', cursor: 'pointer' },
   wsPath: { overflowWrap: 'anywhere' },
   aggRow: { display: 'flex', alignItems: 'baseline', gap: '8px', padding: '2px 0', fontSize: '12px', flexWrap: 'wrap' },
+  itemReadonly: { display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 4px', opacity: 0.7, fontSize: '12px' },
   dialogBackdrop: { position: 'fixed', inset: '0', zIndex: 2147483000, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' },
   dialog: { width: 'min(560px, calc(100vw - 48px))', maxHeight: 'min(640px, calc(100vh - 48px))', overflow: 'auto', background: TOKENS.bg, color: TOKENS.text, border: '1px solid ' + TOKENS.border, borderRadius: 10, padding: '14px 16px', boxShadow: '0 8px 24px rgba(0,0,0,0.25)' },
   dialogTitle: { fontSize: '15px', fontWeight: 600, marginBottom: '6px' },
@@ -514,10 +515,38 @@ function buildItemRow(e, object, selectedSet, busy, onToggle) {
 }
 
 /**
- * 勾选草稿 → 要写进配置的 `workspaces` 值。全勾 = 空列表（= 管平台全部），否则写勾选的路径。
- * @param {string[]} draft 勾选的路径
- * @param {string[]} paths 平台工作区清单
+ * 宿主汇总里的"每个工作区的缺项对象" → 面板分组（按队列顺序）。
+ * 当前工作区可勾选修复；其它工作区只读展示（修复要回它自己的工作区打开面板）。
+ *
+ * @param {object|null} aggregate
+ * @param {string} [currentWorkspace]
+ * @returns {Array<{workspace:string, current:boolean, objects:Array<{path:string, missing:string[], isDir:boolean}>}>}
  */
+export function aggregateObjectGroups(aggregate, currentWorkspace = '') {
+  const items = aggregate && Array.isArray(aggregate.workspaces) ? aggregate.workspaces : [];
+  const groups = [];
+  for (const item of items) {
+    if (!item || typeof item.root !== 'string' || !item.root) continue;
+    const objects = Array.isArray(item.objects) ? item.objects : [];
+    if (!objects.length) continue;
+    const list = [];
+    for (const obj of objects) {
+      if (!obj || typeof obj.path !== 'string' || !obj.path) continue;
+      list.push({
+        path: obj.path,
+        missing: (Array.isArray(obj.items) ? obj.items : []).filter((name) => ITEM_ORDER.includes(name)),
+        isDir: !!obj.isDir,
+      });
+    }
+    if (!list.length) continue;
+    groups.push({
+      workspace: item.root,
+      current: !!currentWorkspace && sameWorkspace(item.root, currentWorkspace),
+      objects: list,
+    });
+  }
+  return groups;
+}
 export function workspacesValueOf(draft, paths) {
   const list = (Array.isArray(draft) ? draft : []).filter((path) => typeof path === 'string' && path);
   const all = Array.isArray(paths) ? paths : [];
@@ -690,11 +719,14 @@ function buildTree(R, model) {
   children.push(e('div', { key: 'aggCard', style: styles.card }, aggChildren));
   if (wsModel.open) children.push(buildWorkspaceDialog(R, model));
 
-  // ---- 勾选清单（按工作区分组）----
-  if (totalCount > 0) {
+  // ---- 勾选清单（按工作区分组：当前工作区可勾选，其它工作区只读展示）----
+  const listGroups = Array.isArray(model.aggregateGroups) && model.aggregateGroups.length
+    ? model.aggregateGroups
+    : groups.map((group) => ({ workspace: group.workspace, objects: group.objects, current: true }));
+  if (listGroups.length > 0) {
     const selectChildren = [];
     selectChildren.push(e('div', { key: 'head', style: styles.row }, [
-      e('span', { key: 'stat', style: styles.title2 }, '已选 ' + selectedCount + ' / 共 ' + totalCount),
+      e('span', { key: 'stat', style: styles.title2 }, '已选 ' + selectedCount + ' / 本工作区共 ' + totalCount),
       e('button', {
         key: 'all',
         type: 'button',
@@ -709,16 +741,26 @@ function buildTree(R, model) {
         disabled: !!busy || selectedCount === 0,
         onClick: handlers.selectNone,
       }, '全不选'),
-      e('span', { key: 'hint', style: styles.tertiary }, '默认全选；取消勾选的对象不会被修改'),
+      e('span', { key: 'hint', style: styles.tertiary }, '默认全选；只有当前工作区可勾选修复，其它工作区只读展示'),
     ]));
     const listChildren = [];
-    for (const group of groups) {
+    for (const group of listGroups) {
+      const readonly = group.current === false;
       listChildren.push(e('div', {
         key: 'g:' + (group.workspace || '?'),
         style: styles.groupHead,
-      }, (group.workspace || '（未知工作区）') + '  ·  ' + group.objects.length + ' 个缺项对象'));
+      }, (group.workspace || '（未知工作区）') + '  ·  ' + group.objects.length + ' 个缺项对象'
+        + (readonly ? '（只读：在它的工作区打开面板才能修）' : '')));
       for (const object of group.objects) {
-        listChildren.push(buildItemRow(e, object, selectedSet, busy, handlers.toggle));
+        listChildren.push(readonly
+          ? e('div', { key: 'ro:' + object.path, style: styles.itemReadonly, title: object.path }, [
+            e('span', { key: 'kind', style: styles.kindTag }, object.isDir ? '目录' : '文件'),
+            e('span', { key: 'path', style: styles.pathText }, object.path),
+            ...object.missing.map((item) => e('span', {
+              key: 'm:' + item, style: styles.badge, title: ITEM_HINT[item] || item,
+            }, item)),
+          ])
+          : buildItemRow(e, object, selectedSet, busy, handlers.toggle));
       }
     }
     selectChildren.push(e('div', { key: 'list', style: styles.list }, listChildren));
@@ -1233,6 +1275,7 @@ export function createClientPlugin({ React, ctx, log }) {
       diagLines,
       currentWorkspace,
       aggregate: aggregate || null,
+      aggregateGroups: aggregateObjectGroups(aggregate, currentWorkspace),
       workspaces: {
         paths: wsPaths,
         draft: wsDraft,

@@ -40,31 +40,39 @@ let sinkTarget = '';
 //
 // Loader 在同一个宿主进程里**重载插件行**时（安装/配置变更），`sharedLog` 的单例还在，
 // 内存环里是旧事件；每次重载都会 `attachFileSink` 一次，把**历史事件再补写一遍**，
-// 日志里就出现同一 bootId/timestamp 的整块重复。这里在 sink 外面套一层"同一条事件只写一次"
-// （键 = bootId|ts|level|event|message；有界集合，超了清空从头记）。
+// 日志里就出现同一 bootId/timestamp 的整块重复。这里在 sink 外面套一层"同一条事件只写一次"。
+//
+// 关键：去重键必须**带目标文件路径**（2026-11-23 真机踩到）。只按事件键去重时，
+// 引导日志（%TEMP%）已经写过的启动事件，会阻止它们被补写进工作区日志 →
+// 工作区日志里少了 `host.mount/apply/plan` 那几行。键改成 `目标路径|bootId|ts|level|event|message`。
 // ---------------------------------------------------------------------------
 
-/** 已经写进文件的键（进程级，有界）。 */
+/** 已经写进各个文件的键（进程级，有界）。 */
 const writtenKeys = new Set();
 
 /** 上限：超过就清空（只影响去重范围，不影响正确性）。 */
 const WRITTEN_LIMIT = 10000;
 
-/** 一条事件的去重键。 */
-export function dedupeKeyOf(event) {
+/**
+ * 一条事件的去重键（按**目标文件**分开记）。
+ * @param {object} event
+ * @param {string} [target] 目标文件路径（不同 sink 各自独立）
+ */
+export function dedupeKeyOf(event, target = '') {
   const value = event && typeof event === 'object' ? event : {};
-  return [value.bootId || '', value.ts || '', value.level || '', value.event || '', value.message || ''].join('|');
+  return [String(target || ''), value.bootId || '', value.ts || '', value.level || '', value.event || '', value.message || ''].join('|');
 }
 
 /**
- * 给文件 sink 套一层"同一条事件只写一次"（供测试与装配共用）。
+ * 给文件 sink 套一层"同一个文件里，同一条事件只写一次"（供测试与装配共用）。
  * @param {object} sink `createFileSink()` 的返回
  * @returns {object} 包装后的 sink（保留 write/flush/disabled/reason/path）
  */
 export function dedupeSink(sink) {
+  const target = sink && sink.path ? String(sink.path) : '';
   return {
     write(event) {
-      const key = dedupeKeyOf(event);
+      const key = dedupeKeyOf(event, target);
       if (writtenKeys.has(key)) return false;
       if (writtenKeys.size >= WRITTEN_LIMIT) writtenKeys.clear();
       writtenKeys.add(key);

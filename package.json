@@ -1,6 +1,6 @@
 {
   "name": "dsh-veneer",
-  "version": "0.4.10",
+  "version": "0.4.12",
   "private": true,
   "license": "MIT",
   "description": "工作区物化保底：检测工作区既有对象是否缺了沙箱物化三项（能力 ACE / Everyone 拒删子项 / Low 标签），出报告，并生成一条需要用户在宿主外提权执行的修复命令。只检测，不在沙箱内改 ACL。",
